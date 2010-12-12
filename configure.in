@@ -1,0 +1,139 @@
+#                                               -*- Autoconf -*-
+# Process this file with autoconf to produce a configure script.
+AC_PREREQ(2.61)
+#
+# The 0MQ version number is extracted from include/zmq.h using
+# the version.sh script. Hence, it should be updated there.
+# The version in git should reflect the *next* version planned.
+#
+AC_INIT([httpush], [0.0.2], [mikko.koppanen@gmail.com])
+
+AC_CONFIG_AUX_DIR(config)
+AC_CONFIG_MACRO_DIR(config)
+AM_CONFIG_HEADER(include/config.h)
+AM_INIT_AUTOMAKE(tar-ustar dist-zip foreign)
+
+# Checks for programs.
+AC_PROG_CC
+AC_PROG_CC_C99
+AM_PROG_CC_C_O
+AC_PROG_SED
+AC_PROG_AWK
+
+AC_LANG_PUSH([C])
+
+# Standard headers & features
+AC_HEADER_STDBOOL
+AC_HEADER_TIME
+AC_TYPE_UINT32_T
+AC_TYPE_SIZE_T
+AC_TYPE_SSIZE_T
+
+# pthreads
+AC_CHECK_LIB([pthread], 
+             [pthread_create], 
+             [LDFLAGS="-lpthread $LDFLAGS"],
+             [AC_MSG_ERROR([Unable to find pthread_create])])
+
+# libzmq
+AC_ARG_WITH([libzmq], 
+            [AS_HELP_STRING([--with-libzmq], 
+                            [Specify libzmq prefix (default=/usr /usr/local)])],
+            [],
+            [hp_search_libzmq="yes"])
+
+if test "x$hp_search_libzmq" = "xyes"; then
+    export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/local/lib/pkgconfig"
+else
+    export PKG_CONFIG_PATH="${with_libzmq}:${with_libzmq}/lib/pkgconfig"
+fi
+
+PKG_CHECK_MODULES([HP_ZMQ], 
+                  [libzmq], 
+                  [], 
+                  [AC_MSG_ERROR([libzmq not found. Use --with-libzmq to specify libzmq prefix])])
+
+CFLAGS="${HP_ZMQ_CFLAGS} ${CFLAGS}"
+LDFLAGS="${HP_ZMQ_LIBS} ${LDFLAGS}"
+
+AC_CHECK_LIB([zmq], 
+             [zmq_init], 
+             [], 
+             [AC_MSG_ERROR([Failed to link against libzmq])])
+
+# libevent
+AC_ARG_WITH([libevent], 
+            [AS_HELP_STRING([--with-libevent], 
+                            [Specify libevent prefix (default=/usr /usr/local)])],
+            [],
+            [hp_search_libevent="yes"])
+
+AC_MSG_CHECKING([searching event.h header])
+
+if test "x$hp_search_libevent" = "xyes"; then
+    for i in /usr /usr/local; do
+        if test -r "${i}/include/event.h"; then
+            HP_LIBEVENT_PREFIX=$i && break
+        fi
+    done
+else
+    if test -r "${with_libevent}/include/event.h"; then
+        HP_LIBEVENT_PREFIX="${with_libevent}"
+    fi
+fi
+
+if test "x${HP_LIBEVENT_PREFIX}" = "x"; then
+    AC_MSG_ERROR([not found. Please reinstall libevent])
+else
+    AC_MSG_RESULT([found in ${HP_LIBEVENT_PREFIX}])
+fi
+
+CFLAGS="-I$HP_LIBEVENT_PREFIX/include ${CFLAGS}"
+LDFLAGS="-L$HP_LIBEVENT_PREFIX/lib -levent ${LDFLAGS}"
+
+AC_CHECK_HEADERS([sys/types.h sys/queue.h inttypes.h \
+                  stdint.h pthread.h syslog.h])
+
+AC_CHECK_HEADERS([event.h],
+                 [], 
+                 [AC_MSG_ERROR([check failed for event.h. Check config.log for more details])],
+[[#ifdef HAVE_SYS_TYPES_H
+# include <sys/types.h>
+#endif
+]])
+
+AC_CHECK_HEADERS([evhttp.h], 
+                 [], 
+                 [AC_MSG_ERROR([check failed for evhttp.h. Check config.log for more details])],
+[[#ifdef HAVE_SYS_TYPES_H
+# include <sys/types.h>
+#endif
+#ifdef HAVE_SYS_QUEUE_H
+# include <sys/queue.h>
+#endif
+#ifdef HAVE_EVENT_H
+# include <event.h>
+#endif
+]])
+
+# whether to use rpath
+AC_ARG_ENABLE([rpath], 
+              [AS_HELP_STRING([--disable-rpath], 
+                              [Whether to hard-code the path to shared libraries])])
+         
+if test "x$hp_use_rpath" != "xno"; then
+    CFLAGS="-Wl,-rpath=`${PKG_CONFIG} --variable=libdir libzmq` ${CFLAGS}"
+    CFLAGS="-Wl,-rpath=${HP_LIBEVENT_PREFIX}/lib ${CFLAGS}"
+fi
+
+if test "x$GCC" = "xyes"; then
+    CFLAGS="-Wall -Werror -pedantic ${CFLAGS}"
+fi
+
+AC_LANG_POP([C])
+
+AC_CONFIG_FILES([Makefile src/Makefile])
+AC_OUTPUT
+
+
+        
