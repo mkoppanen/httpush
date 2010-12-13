@@ -82,44 +82,92 @@ struct httpush_args_t {
 	
 	/* 0MQ swap */
 	int64_t swap;
+	
+	/* Whether to include headers in the messages */
+	bool include_headers;
 };
 
-#define HTTPUSH_INTERCOMM "inproc://inter-thread"
+struct httpush_device_args_t {
+	void *ctx;
+	uint64_t hwm;  
+	int64_t swap;
+	char **dsn;
+	size_t num_dsn;
+	void *in_socket;
+	void *out_socket;
+	void *intercomm;
+};
 
-#define HTTPUSH_INPROC "inproc://message-transport"
+struct httpush_httpd_args_t {
+    /* 0MQ context */
+    void *ctx;
+
+    /* Socket to communicate with parent */
+    void *intercomm;
+
+    /* Socket to communicate with device */
+    void *device;
+
+    /* Http bind host */
+    const char *http_host;
+
+    /* Http bind port */
+    int http_port;
+
+    struct event_base *base;
+
+    /* If the shutdown event arrives */
+    struct event shutdown;
+
+	/* Whether to include headers in the messages */
+	bool include_headers;
+};
+
+struct httpush_pair_t {
+    void *front;
+    void *back;
+};
+
+#define HP_SEC_TO_MSEC(sec_) (sec_ * 1000000)
 
 #ifdef DEBUG
-#	define HP_LOG_ERROR(...) fprintf(stderr, "ERROR: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
+#	define HP_LOG_ERROR(...) fprintf(stderr, "ERROR: ");   fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
 #	define HP_LOG_WARN(...)  fprintf(stderr, "WARNING: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
-#	define HP_LOG_DEBUG(...) fprintf(stderr, "DEBUG: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
+#	define HP_LOG_DEBUG(...) fprintf(stderr, "DEBUG: ");   fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
 #else
 #	define HP_LOG_ERROR(...) syslog(LOG_ERR, __VA_ARGS__);
-#	define HP_LOG_WARN(...) syslog(LOG_WARNING, __VA_ARGS__);
+#	define HP_LOG_WARN(...)  syslog(LOG_WARNING, __VA_ARGS__);
 #	define HP_LOG_DEBUG(...)
 #endif
 
-typedef enum _httpush_inproc_msg_t {
+typedef enum _httpush_msg_t {
 	HTTPD_READY = 10,
 	HTTPD_FAIL,
 	HTTPD_SHUTDOWN,
 	DEVICE_READY,
-	DEVICE_FAIL
-} httpush_inproc_msg_t;
+	DEVICE_FAIL,
+	DEVICE_SHUTDOWN
+} httpush_msg_t;
 
 int hp_sendmsg(void *socket, const void *message, size_t message_len, int flags);
 int hp_recvmsg(void *socket, void **message, size_t *message_len, int flags);
 
 void *hp_socket(void *context, int type, const char *dsn);
 
-int hp_intercomm_send(void *socket, httpush_inproc_msg_t inproc_msg);
-bool hp_intercomm_recv(void *socket, httpush_inproc_msg_t expected_msg, long timeout);
+int hp_intercomm_send(void *socket, httpush_msg_t inproc_msg);
+bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout);
 
 int server_boostrap(struct httpush_args_t *args);
 
 void *start_device_thread(void *thread_args);
 
-void *start_httpd_thread(void *thread_args);
-
 void hp_socket_list_free();
+
+bool hp_create_device(pthread_t *thread, void *thread_args);
+
+bool hp_create_httpd(pthread_t *thread, struct httpush_httpd_args_t *httpd_args);
+
+bool hp_create_pair(void *context, const char *dsn, struct httpush_pair_t *pair);
+
 
 #endif /* __HTTPUSH_H__ */

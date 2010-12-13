@@ -43,10 +43,11 @@ static void show_help(const char *d)
 	fprintf(stderr, " -g <value>    Group to run as\n");
 	fprintf(stderr, " -i <value>    Number of 0MQ IO threads\n");
 	fprintf(stderr, " -l <value>    The 0MQ high watermark limit\n");
+	fprintf(stderr, " -o            Optimize for bandwidth usage (exclude headers from messages)\n");
 	fprintf(stderr, " -p <value>    HTTP listen port\n");
-	fprintf(stderr, " -s <value>    Swap size for messages that exceed high watermark (G/M/k)\n");
-	fprintf(stderr, " -z <value>    Comma-separated list of 0MQ publisher URIs\n");
+	fprintf(stderr, " -s <value>    Disk offload size (G/M/k/B)\n");
 	fprintf(stderr, " -u <value>    User to run as\n");
+	fprintf(stderr, " -z <value>    Comma-separated list of 0MQ URIs to connect to\n");
 }
 
 void signal_handler(int sig) {
@@ -98,7 +99,7 @@ void background()
 
 static char **parse_dsn(const char *param, size_t *num)
 {
-	char *ptr, *pch, **retval;
+	char *ptr, *pch, **retval = NULL;
 
 	*num = 0;
 
@@ -110,9 +111,8 @@ static char **parse_dsn(const char *param, size_t *num)
 		return NULL;
 	}
 
-	retval = malloc(sizeof(char *));
-
 	while (pch) {
+        retval = realloc(retval, (*num + 1) * sizeof(char *));
 		retval[(*num)++] = strdup(pch);
 		pch = strtok(NULL, ", ");
 	}
@@ -164,19 +164,24 @@ static int64_t unit_to_bytes(const char *expression)
     }
 
     if (*end) {
-        if (*end == 'G') {
+        if (*end == 'G' || *end == 'g') {
             factor = 1024 * 1024 * 1024;
-        } else if (*end == 'M') {
+        } else if (*end == 'M' || *end == 'm') {
             factor = 1024 * 1024;
-        } else if (*end == 'k') {
+        } else if (*end == 'K' || *end == 'k') {
             factor = 1024;
+        } else if (*end == 'B' || *end == 'b') { 
+            /* Noop */
+        } else {
+            fprintf(stderr, "Unknown swap size unit '%s'\n", end);
+            exit(1);
         }
     }
     ret = (int64_t) converted * factor;
     return ret;
 }
 
-void change_working_directory()
+bool change_working_directory()
 {
     const char *tmp;
 
@@ -186,15 +191,16 @@ void change_working_directory()
         tmp = "/tmp";
     }
 
-    if ((chdir(tmp)) < 0) {
-		fprintf(stderr, "Failed to change directory to %s: %s", tmp, strerror(errno));
-        exit(EXIT_FAILURE);
+    if (chdir(tmp) < 0) {
+        return false;
     }
+    return true;
 }
 
 
 int main(int argc, char **argv)
 {
+    size_t i;
 	const char *user = "nobody";
 	const char *group = "nobody";
 
@@ -209,10 +215,11 @@ int main(int argc, char **argv)
 	args.num_dsn    = 0;
     args.hwm        = 0;
     args.swap       = 0;
+    args.include_headers = true;
 
 	opterr = 0;
 
-	while ((c = getopt (argc, argv, "bd:g:i:l:p:s:u:z:")) != -1) {
+	while ((c = getopt (argc, argv, "bd:g:i:l:op:s:u:z:")) != -1) {
 		switch (c) {
 
 			case 'b':
@@ -237,6 +244,10 @@ int main(int argc, char **argv)
 
 			case 'l':
                 args.hwm = (uint64_t) atoi(optarg);
+			break;
+
+			case 'o':
+				args.include_headers = false;
 			break;
 
 			case 'p':
@@ -298,16 +309,32 @@ int main(int argc, char **argv)
     }
 
     /* Change the current working directory */
-    change_working_directory();
+    if (change_working_directory() == false) {
+        HP_LOG_ERROR("Failed to change directory: %s", strerror(errno));
+		exit(1);
+    }
 
 	/* Initialize the 0MQ context after fork */
 	args.ctx = zmq_init(io_threads);
 
 	if (!args.ctx) {
-		HP_LOG_ERROR("Failed to initialize 0MQ context: %s\n", zmq_strerror(errno));
+		HP_LOG_ERROR("Failed to initialize zmq context: %s\n", zmq_strerror(errno));
 		exit(1);
 	}
 
+    /* This call will block */
 	rc = server_boostrap(&args);
-	exit(rc);
+
+    if (args.num_dsn) {
+        for (i = 0; i < args.num_dsn; i++) {
+            free(args.dsn[i]);
+        }
+        free(args.dsn);
+    }
+
+    HP_LOG_DEBUG("Terminating zmq context");
+    zmq_term(args.ctx);
+
+    HP_LOG_WARN("Terminating process");
+    exit(rc);
 }

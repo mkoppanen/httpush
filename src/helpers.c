@@ -91,40 +91,72 @@ int hp_recvmsg(void *socket, void **message, size_t *message_len, int flags)
 	return 0;
 }
 
+#define tv_to_msec(tv_) (((tv_)->tv_sec * 1000 * 1000) + (tv_)->tv_usec)
+
 /**
  * Receive a message from the intercomm. The message contains 
- * httpush_inproc_msg_t incating an event (such as HTTPD_READY) on the child
+ * httpush_msg_t incating an event (such as HTTPD_READY) on the child
  * Returns true if a message was received and matches inproc_msg param
  * Returns false on failure
  */
-bool hp_intercomm_recv(void *socket, httpush_inproc_msg_t expected_msg, long timeout)
+bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout)
 {
-	int rc, i = (timeout * 1000);
-	zmq_msg_t msg;
-	httpush_inproc_msg_t x;
+    zmq_pollitem_t items[1];
+    struct timeval now, elapsed;
+    long timeout_abs, wait;
 
-	rc = zmq_msg_init(&msg);
-	if (rc != 0) {
-		return false;
-	}
+	int rc;
+	httpush_msg_t x = 0;
 
-	while (--i) {
-		rc = zmq_recv(socket, &msg, ZMQ_NOBLOCK);
+    items[0].socket = socket;
+    items[0].events = ZMQ_POLLIN;
 
-		if (rc == 0) {
-			break;
-		}
-		usleep(1000);
-	}
+    rc = gettimeofday(&now, NULL);
+    if (rc != 0) {
+        return false;
+    }
+    timeout_abs = tv_to_msec(&now) + timeout;
 
-	if (rc != 0) {
-		zmq_msg_close(&msg);
-		return false;
-	}
+    wait = timeout;
 
-	memcpy(&x, zmq_msg_data(&msg), sizeof(httpush_inproc_msg_t));
-	zmq_msg_close(&msg);
+    while (true) {
+        rc = zmq_poll(items, 1, wait);
 
+        if (!rc) {
+            rc = gettimeofday(&elapsed, NULL);
+
+            if (rc == 0) {
+                wait = timeout_abs - tv_to_msec(&elapsed);
+                if (wait > 0) {
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+
+    if (rc < 0) {
+        return false;
+    }
+
+    if (rc && items[0].revents | ZMQ_POLLIN) {
+        zmq_msg_t msg;
+
+        rc = zmq_msg_init(&msg);
+    	if (rc != 0) {
+    		return false;
+    	}
+        rc = zmq_recv(socket, &msg, ZMQ_NOBLOCK);
+
+        if (rc != 0) {
+    		zmq_msg_close(&msg);
+    		return false;
+    	}
+    	if (zmq_msg_size(&msg) == sizeof(httpush_msg_t)) {
+    	    memcpy(&x, zmq_msg_data(&msg), sizeof(httpush_msg_t));
+    	}
+    	zmq_msg_close(&msg);
+    }
 	return (x == expected_msg);
 }
 
@@ -133,10 +165,10 @@ bool hp_intercomm_recv(void *socket, httpush_inproc_msg_t expected_msg, long tim
  * master process
  *
  */
-int hp_intercomm_send(void *socket, httpush_inproc_msg_t inproc_msg)
+int hp_intercomm_send(void *socket, httpush_msg_t inproc_msg)
 {
 	return hp_sendmsg(socket, (const void *) &inproc_msg,
-	                    sizeof(httpush_inproc_msg_t), ZMQ_NOBLOCK);
+	                    sizeof(httpush_msg_t), ZMQ_NOBLOCK);
 }
 
 /**
@@ -179,10 +211,32 @@ void *hp_socket(void *context, int type, const char *dsn)
     ++num_allocated_sockets;
     allocated_sockets = realloc(allocated_sockets, num_allocated_sockets * sizeof(void *));
     allocated_sockets[num_allocated_sockets - 1] = socket;
-    HP_LOG_DEBUG("Allocated socket %lu", (unsigned long) num_allocated_sockets);
-
 	return socket;
 }
+
+bool hp_create_pair(void *context, const char *dsn, struct httpush_pair_t *pair)
+{
+    int rc;
+
+    pair->front = hp_socket(context, ZMQ_PAIR, NULL);
+    if (!pair->front)
+        return false;
+
+    rc = zmq_bind(pair->front, dsn);
+    if (rc != 0)
+        return false;
+
+    pair->back = hp_socket(context, ZMQ_PAIR, NULL);
+    if (!pair->back)
+        return false;
+
+    rc = zmq_connect(pair->back, dsn);
+    if (rc != 0)
+        return false;
+
+    return true;
+}
+
 
 void hp_socket_list_free() 
 {
@@ -201,7 +255,6 @@ void hp_socket_list_free()
         if (rc != 0) {
             HP_LOG_WARN("Failed to close socket");
         }
-        HP_LOG_DEBUG("Closed socket %lu", (unsigned long) i + 1);
     }
     free(allocated_sockets);
 }

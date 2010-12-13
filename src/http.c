@@ -30,10 +30,7 @@
 
 #include "httpush.h"
 
-struct httpush_timer_args_t {
-    struct event_base *base;
-    struct event timeout;
-};
+
 
 extern sig_atomic_t shutting_down;
 
@@ -141,13 +138,14 @@ static void reflect_request(struct evhttp_request *req, void *param)
 	evbuffer_free(evb);
 }
 
-static void publish_message(struct evhttp_request *req, void *inproc_socket)
+static void publish_message(struct evhttp_request *req, void *args)
 {
 	int rc = 0;
-    struct evbuffer *header_evb;
+
+    struct httpush_httpd_args_t *httpd_args = (struct httpush_httpd_args_t *)args;
 
     ++httpd_requests;
-    HP_LOG_DEBUG("Handling request to %s from %s:%d", evhttp_request_uri(req), req->remote_host, req->remote_port);
+    //HP_LOG_DEBUG("Handling request to %s from %s:%d", evhttp_request_uri(req), req->remote_host, req->remote_port);
 
 	if (EVBUFFER_LENGTH(req->input_buffer) < 1) {
 		evhttp_send_error(req, 412, "Precondition Failed");
@@ -155,26 +153,29 @@ static void publish_message(struct evhttp_request *req, void *inproc_socket)
 		return;
 	}
 
-	/* Send the first part of the message, headers */
-    header_evb = evbuffer_new();
-    if (!header_evb) {
-		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
-		++httpd_code_503;
-        return;
+	if (httpd_args->include_headers == true) {
+
+    	/* Send the first part of the message, headers */
+        struct evbuffer *header_evb = evbuffer_new();
+        if (!header_evb) {
+    		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
+    		++httpd_code_503;
+            return;
+        }
+
+        print_headers_to_buffer(req, header_evb);
+    	rc = hp_sendmsg(httpd_args->device, (const void *) EVBUFFER_DATA(header_evb), EVBUFFER_LENGTH(header_evb), ZMQ_SNDMORE);
+        evbuffer_free(header_evb);
+
+        if (rc != 0) {
+            HP_LOG_ERROR("Failed to send message: %s\n", zmq_strerror(errno));
+    		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
+    		++httpd_code_503;
+            return;
+        }
     }
 
-    print_headers_to_buffer(req, header_evb);
-	rc = hp_sendmsg(inproc_socket, (const void *) EVBUFFER_DATA(header_evb), EVBUFFER_LENGTH(header_evb), ZMQ_SNDMORE);
-    evbuffer_free(header_evb);
-
-    if (rc != 0) {
-        HP_LOG_ERROR("Failed to send message: %s\n", zmq_strerror(errno));
-		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
-		++httpd_code_503;
-        return;
-    }
-
-	rc = hp_sendmsg(inproc_socket, (const void *) EVBUFFER_DATA(req->input_buffer), EVBUFFER_LENGTH(req->input_buffer), 0);
+	rc = hp_sendmsg(httpd_args->device, (const void *) EVBUFFER_DATA(req->input_buffer), EVBUFFER_LENGTH(req->input_buffer), 0);
 
 	if (rc != 0) {
 		HP_LOG_ERROR("Failed to send message: %s\n", zmq_strerror(errno));
@@ -199,71 +200,78 @@ static void publish_message(struct evhttp_request *req, void *inproc_socket)
 	}
 }
 
-static void hp_intercomm_cb(int fd, short event, void *socket)
+static void hp_intercomm_cb(int fd, short event, void *args)
 {
-    fprintf(stderr, "Intercomm called\n");
+    int rc;
+    struct httpush_httpd_args_t *httpd_args = (struct httpush_httpd_args_t *)args;
+
+    /* Reschedule the event */
+    event_add(&(httpd_args->shutdown), NULL);
+
+    HP_LOG_DEBUG("httpd received intercomm event");
+
+    while (true) {
+        uint32_t events;
+        size_t siz = sizeof(uint32_t);
+
+        rc = zmq_getsockopt(httpd_args->intercomm, ZMQ_EVENTS, &events, &siz);
+        if (rc != 0) {
+            break;
+        }
+
+        if (!(events & ZMQ_POLLIN)) {
+            break;
+        }
+
+        /* Wait for maximum of 1 seconds */
+        if (hp_intercomm_recv(httpd_args->intercomm, HTTPD_SHUTDOWN, HP_SEC_TO_MSEC(1)) == true) {
+            struct timeval tv = { 0, 2 };
+
+            HP_LOG_DEBUG("Terminating event loop");
+            event_base_loopexit(httpd_args->base, &tv);
+        }
+    }
 }
 
-void *start_httpd_thread(void *thread_args) 
+static void init_intercomm_event(struct httpush_httpd_args_t *httpd_args)
 {
-    struct event shutdown;
-    struct event_base *base;
-	struct evhttp *httpd;
-
-    int rc;
-	void *inproc, *intercomm;
-	struct httpush_args_t *args = (struct httpush_args_t *)thread_args;
-
-	/* This socket is used to communicate with parent */
-	intercomm = hp_socket(args->ctx, ZMQ_PUSH, HTTPUSH_INTERCOMM);
-	if (!intercomm) {
-		return NULL;
-	}
-
-	/* front socket takes messages from http */
-	inproc = hp_socket(args->ctx, ZMQ_PUSH, HTTPUSH_INPROC);
-	if (!inproc) {
-		hp_intercomm_send(intercomm, HTTPD_FAIL);
-		return NULL;
-	}
-
-	/* Initialize libevent */
-	base = event_base_new();
-	if (!base) {
-		hp_intercomm_send(intercomm, HTTPD_FAIL);
-		return NULL;
-	}
-
-	/* ------- */
-
-    /* Use libevent to monitor the intercomm socket. The master process signals 
-       shutdown using this fd */
-    int fd = -1;
+    int rc, fd = -1;
     size_t fd_size = sizeof(int);
-    struct timeval tv;
+    struct timeval tv = {0};
 
-    rc = zmq_getsockopt(intercomm, ZMQ_FD, &fd, &fd_size);
+    rc = zmq_getsockopt(httpd_args->intercomm, ZMQ_FD, &fd, &fd_size);
     assert(rc == 0);
 
     /* Create the event */
-    event_set(&shutdown, fd, EV_READ, hp_intercomm_cb, intercomm);
-    event_base_set(base, &shutdown);
+    event_set(&(httpd_args->shutdown), fd, EV_READ, hp_intercomm_cb, httpd_args);
+    event_base_set(httpd_args->base, &(httpd_args->shutdown));
 
-    event_add(&shutdown, &tv);
+    event_add(&(httpd_args->shutdown), &tv);
+}
 
-    /* ------- */
+static void *start_httpd_thread(void *thread_args) 
+{
+    int rc;
+	struct evhttp *httpd;
+    struct httpush_httpd_args_t *httpd_args;
+
+    httpd_args = (struct httpush_httpd_args_t *) thread_args;
+
+    /* Use libevent to monitor the intercomm socket. The master process signals 
+       shutdown using this fd */
+    init_intercomm_event(httpd_args);
 
 	/* HTTP server init */
-	httpd = evhttp_new(base);
+	httpd = evhttp_new(httpd_args->base);
 
 	if (!httpd) {
-		hp_intercomm_send(intercomm, HTTPD_FAIL);
+		hp_intercomm_send(httpd_args->intercomm, HTTPD_FAIL);
 		return NULL;
 	}
 
-	rc = evhttp_bind_socket(httpd, args->http_host, args->http_port);
+	rc = evhttp_bind_socket(httpd, httpd_args->http_host, httpd_args->http_port);
 	if (rc != 0) {
-		hp_intercomm_send(intercomm, HTTPD_FAIL);
+		hp_intercomm_send(httpd_args->intercomm, HTTPD_FAIL);
 		return NULL;
 	}
 
@@ -272,14 +280,40 @@ void *start_httpd_thread(void *thread_args)
 	evhttp_set_cb(httpd, "/reflect", reflect_request, NULL);
 
 	/* Catch all */
-	evhttp_set_gencb(httpd, publish_message, inproc);
+	evhttp_set_gencb(httpd, publish_message, httpd_args);
 
 	/* Start main loop */
-	hp_intercomm_send(intercomm, HTTPD_READY);
-	event_base_dispatch(base);
+	hp_intercomm_send(httpd_args->intercomm, HTTPD_READY);
+	event_base_dispatch(httpd_args->base);
 
 	/* Not reached in this code as it is now. */
 	evhttp_free(httpd);
-    event_base_free(base);
+    event_base_free(httpd_args->base);
 	return NULL;
 }
+
+/*  
+    Creates the httpd thread and returns a socket that can be used to 
+    communicate with this thread.
+*/
+bool hp_create_httpd(pthread_t *thread, struct httpush_httpd_args_t *httpd_args)
+{
+    /* Initialize libevent */
+	httpd_args->base = event_base_new();
+
+	if (!httpd_args->base) {
+	    HP_LOG_ERROR("Failed to initialize libevent: %s", strerror(errno));
+		return NULL;
+	}
+
+    /*
+        Run the httpd in its own thread. 
+    */
+	if (pthread_create(thread, NULL, start_httpd_thread, (void *) httpd_args) != 0) {
+		HP_LOG_ERROR("Failed to create httpd thread: %s", strerror(errno));
+        return false;
+	}
+
+    return true;
+}
+

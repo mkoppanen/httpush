@@ -34,63 +34,77 @@ extern sig_atomic_t shutting_down;
 
 int server_boostrap(struct httpush_args_t *args)
 {
+    struct httpush_pair_t device_pair = {0};
+    struct httpush_pair_t httpd_pair = {0};
+    struct httpush_pair_t message_pair = {0};
+    struct httpush_device_args_t device_args = {0};
+    struct httpush_httpd_args_t httpd_args = {0};
+
     int rc;
-	void *intercomm;
 	pthread_t httpd_thread = {0};
 	pthread_t device_thread = {0};
 
-	/* Master pulls messages from children */
-	intercomm = hp_socket(args->ctx, ZMQ_PULL, HTTPUSH_INTERCOMM);
+	/* This pair is a bridge between the device and httpd */
+    if (hp_create_pair(args->ctx, "inproc://message-pair", &message_pair) == false) {
+        return 1;
+    }
 
-	if (!intercomm) {
-		HP_LOG_ERROR("Failed to create intercomm 0MQ socket: %s", zmq_strerror(errno));
-		return 1;
-	}
+    /* This pair is a bridge between the device and master process */
+    if (hp_create_pair(args->ctx, "inproc://device-pair", &device_pair) == false) {
+        return 1;
+    }
 
-	/* Start the device thread */
-	if (pthread_create(&device_thread, NULL, start_device_thread, (void *) args) != 0) {
-		HP_LOG_ERROR("Failed to create thread: %s", strerror(errno));
-		return 1;
-	}
+	/* This pair is used to communicate from httpd to master process */
+    if (hp_create_pair(args->ctx, "inproc://httpd-pair", &httpd_pair) == false) {
+        return 1;
+    }
 
-	if (hp_intercomm_recv(intercomm, DEVICE_READY, 5) == false) {
-		HP_LOG_ERROR("Failed to start the 0MQ device");
-		return 1;
-	}
+    httpd_args.ctx             = args->ctx;
+    httpd_args.intercomm       = httpd_pair.back;
+    httpd_args.device          = message_pair.front;
+    httpd_args.http_host       = args->http_host;
+    httpd_args.http_port       = args->http_port;
+    httpd_args.include_headers = args->include_headers;
 
-	/* Start the httpd thread */
-	if (pthread_create(&httpd_thread, NULL, start_httpd_thread, (void *) args) != 0) {
-		HP_LOG_ERROR("Failed to create thread: %s", strerror(errno));
-		return 1;
-	}
+    if (hp_create_httpd(&httpd_thread, &httpd_args) == false ||
+        hp_intercomm_recv(httpd_pair.front, HTTPD_READY, HP_SEC_TO_MSEC(2)) == false) {
+        HP_LOG_ERROR("Failed to start the httpd server");
+        return 1;
+    }
 
-	if (hp_intercomm_recv(intercomm, HTTPD_READY, 5) == false) {
-		HP_LOG_ERROR("Failed to start the httpd server");
+    device_args.ctx       = args->ctx;
+    device_args.hwm       = args->hwm;
+    device_args.swap      = args->swap;
+    device_args.dsn       = args->dsn;
+    device_args.num_dsn   = args->num_dsn;
+    device_args.in_socket = message_pair.back;
+    device_args.intercomm = device_pair.back;
+
+    /* Block here until sigint arrives */
+    if (hp_create_device(&device_thread, &device_args) == false ||
+        hp_intercomm_recv(device_pair.front, DEVICE_READY, HP_SEC_TO_MSEC(2)) == false) {
+		HP_LOG_ERROR("Failed to start the zmq device server");
 		return 1;
-	}
+    }
 
 	while (1) {
 		/* TODO: maybe a bit cleaner shutdown */
 		if (shutting_down) {
-		    HP_LOG_DEBUG("Canceling device thread");
-            rc = pthread_cancel(device_thread);
-            assert (rc == 0);
+            rc = hp_intercomm_send(httpd_pair.front, HTTPD_SHUTDOWN);
+            assert(rc == 0);
 
-		    HP_LOG_DEBUG("Joining device thread");
-            rc = pthread_join(device_thread, NULL);
-            assert (rc == 0);
-
-			HP_LOG_DEBUG("Joining httpd thread");
             rc = pthread_join(httpd_thread, NULL);
+            assert (rc == 0);
+
+            rc = hp_intercomm_send(device_pair.front, DEVICE_SHUTDOWN);
+            assert(rc == 0);
+
+            rc = pthread_join(device_thread, NULL);
             assert (rc == 0);
 
             HP_LOG_DEBUG("Closing all sockets");
             hp_socket_list_free();
 
-            HP_LOG_DEBUG("Terminating context");
-            zmq_term(args->ctx);
-
-            HP_LOG_WARN("Terminating process");
             return 0;
 		}
 		sleep(1);
