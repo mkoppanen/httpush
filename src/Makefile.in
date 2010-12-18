@@ -45,8 +45,8 @@ CONFIG_CLEAN_FILES =
 am__installdirs = "$(DESTDIR)$(bindir)" "$(DESTDIR)$(includedir)"
 binPROGRAMS_INSTALL = $(INSTALL_PROGRAM)
 PROGRAMS = $(bin_PROGRAMS)
-am_httpush_OBJECTS = device.$(OBJEXT) helpers.$(OBJEXT) http.$(OBJEXT) \
-	main.$(OBJEXT) server.$(OBJEXT)
+am_httpush_OBJECTS = device.$(OBJEXT) helpers.$(OBJEXT) \
+	httpd.$(OBJEXT) main.$(OBJEXT) server.$(OBJEXT)
 httpush_OBJECTS = $(am_httpush_OBJECTS)
 httpush_LDADD = $(LDADD)
 DEFAULT_INCLUDES = -I.@am__isrc@ -I$(top_builddir)/include
@@ -157,7 +157,7 @@ sysconfdir = @sysconfdir@
 target_alias = @target_alias@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
-httpush_SOURCES = device.c helpers.c http.c main.c server.c
+httpush_SOURCES = device.c helpers.c httpd.c main.c server.c
 include_HEADERS = ../include/httpush.h
 all: all-am
 
@@ -227,7 +227,7 @@ distclean-compile:
 
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/device.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/helpers.Po@am__quote@
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/http.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/httpd.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/main.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/server.Po@am__quote@
 

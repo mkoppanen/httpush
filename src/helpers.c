@@ -39,21 +39,20 @@ static size_t num_allocated_sockets = 0;
  * Returns 0 on success and <> 0 on failure
  * 'errno' should indicate the error 
  */
-int hp_sendmsg(void *socket, const void *message, size_t message_len, int flags)
+bool hp_sendmsg(void *socket, const void *message, size_t message_len, int flags)
 {
 	int rc;
 	zmq_msg_t msg;
 
 	rc = zmq_msg_init_size(&msg, message_len);
-	if (rc != 0) {
-		return rc;
-	}
+	if (rc != 0)
+        return false;
 
 	memcpy(zmq_msg_data(&msg), message, message_len);
 	rc = zmq_send(socket, &msg, flags);
 
 	zmq_msg_close(&msg);
-	return rc;
+	return (rc == 0);
 }
 
 /**
@@ -61,34 +60,33 @@ int hp_sendmsg(void *socket, const void *message, size_t message_len, int flags)
  * Returns 0 on success and <> 0 on failure
  * 'errno' should indicate the error 
  */
-int hp_recvmsg(void *socket, void **message, size_t *message_len, int flags)
+bool hp_recvmsg(void *socket, void **message, size_t *message_len, int flags)
 {
 	int rc;
 	zmq_msg_t msg;
 
 	rc = zmq_msg_init(&msg);
-	if (rc != 0) {
-		return rc;
-	}
+	if (rc != 0)
+        return false;
 
 	rc = zmq_recv(socket, &msg, flags);
 
 	if (rc != 0) {
 		zmq_msg_close(&msg);
-		return rc;
+		return false;
 	}
 	*message = malloc(zmq_msg_size(&msg));
 
 	if (!*message) {
 		zmq_msg_close(&msg);
-		return rc;
+		return false;
 	}
 
 	memcpy(*message, zmq_msg_data(&msg), zmq_msg_size(&msg));
 	*message_len = zmq_msg_size(&msg);
 
 	zmq_msg_close(&msg);
-	return 0;
+    return true;
 }
 
 #define tv_to_msec(tv_) (((tv_)->tv_sec * 1000 * 1000) + (tv_)->tv_usec)
@@ -101,39 +99,14 @@ int hp_recvmsg(void *socket, void **message, size_t *message_len, int flags)
  */
 bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout)
 {
+    int rc;
     zmq_pollitem_t items[1];
-    struct timeval now, elapsed;
-    long timeout_abs, wait;
-
-	int rc;
 	httpush_msg_t x = 0;
 
     items[0].socket = socket;
     items[0].events = ZMQ_POLLIN;
 
-    rc = gettimeofday(&now, NULL);
-    if (rc != 0) {
-        return false;
-    }
-    timeout_abs = tv_to_msec(&now) + timeout;
-
-    wait = timeout;
-
-    while (true) {
-        rc = zmq_poll(items, 1, wait);
-
-        if (!rc) {
-            rc = gettimeofday(&elapsed, NULL);
-
-            if (rc == 0) {
-                wait = timeout_abs - tv_to_msec(&elapsed);
-                if (wait > 0) {
-                    continue;
-                }
-            }
-        }
-        break;
-    }
+    rc = zmq_poll(items, 1, timeout);
 
     if (rc < 0) {
         return false;
@@ -152,9 +125,9 @@ bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout)
     		zmq_msg_close(&msg);
     		return false;
     	}
-    	if (zmq_msg_size(&msg) == sizeof(httpush_msg_t)) {
+    	if (zmq_msg_size(&msg) == sizeof(httpush_msg_t))
     	    memcpy(&x, zmq_msg_data(&msg), sizeof(httpush_msg_t));
-    	}
+
     	zmq_msg_close(&msg);
     }
 	return (x == expected_msg);
@@ -165,7 +138,7 @@ bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout)
  * master process
  *
  */
-int hp_intercomm_send(void *socket, httpush_msg_t inproc_msg)
+bool hp_intercomm_send(void *socket, httpush_msg_t inproc_msg)
 {
 	return hp_sendmsg(socket, (const void *) &inproc_msg,
 	                    sizeof(httpush_msg_t), ZMQ_NOBLOCK);
@@ -237,15 +210,57 @@ bool hp_create_pair(void *context, const char *dsn, struct httpush_pair_t *pair)
     return true;
 }
 
+struct httpush_uri_t *hp_parse_uri(const char *uri)
+{
+    char *pch, *ptr, *last = NULL;
+    struct httpush_uri_t *retval;
+
+    struct evkeyval *item;
+    struct evkeyvalq *q;
+
+    struct evkeyvalq params;
+    evhttp_parse_query(uri, &params);
+
+    retval           = malloc(sizeof(*retval));
+    retval->swap     = 0;
+    retval->swap_set = false;
+
+    retval->hwm     = 0;
+    retval->hwm_set = false;
+
+    ptr = strdup(uri);
+    if (!ptr)
+        return NULL;
+
+    pch = strtok_r(ptr, "?", &last);
+    if (!pch) {
+        free(ptr);
+        return NULL;
+    }
+
+    retval->uri = strdup(pch);
+    q = &params;
+
+    TAILQ_FOREACH(item, q, next) {
+        if (!strcmp(item->key, "swap")) {
+            bool success;
+            retval->swap     = (int64_t) hp_unit_to_bytes(item->value, &success);
+            if (!success)
+                return NULL;
+
+            retval->swap_set = true;
+        } else if (!strcmp(item->key, "hwm")) {
+            retval->hwm     = (uint64_t) atoi(item->value);
+            retval->hwm_set = true;
+        }
+    }
+    free(ptr);
+    return retval;
+}
 
 void hp_socket_list_free() 
 {
     size_t i;
-
-#ifdef __GNUC__
-    /* Ensure full memory barrier */
-    __sync_synchronize();
-#endif
 
     if (!num_allocated_sockets)
         return;
@@ -257,4 +272,51 @@ void hp_socket_list_free()
         }
     }
     free(allocated_sockets);
+}
+
+int64_t hp_unit_to_bytes(const char *expression, bool *success)
+{
+    int64_t ret;
+
+    char *end = NULL;
+    long converted, factor = 1;
+
+    *success = false;
+
+    converted = strtol(expression, &end, 0);
+
+    /* Failed */
+    if (ERANGE == errno || end == expression) {
+        return 0;
+    }
+
+    if (*end) {
+        if (*end == 'G' || *end == 'g') {
+            factor = 1024 * 1024 * 1024;
+        } else if (*end == 'M' || *end == 'm') {
+            factor = 1024 * 1024;
+        } else if (*end == 'K' || *end == 'k') {
+            factor = 1024;
+        } else if (*end == 'B' || *end == 'b') { 
+            /* Noop */
+        } else {
+            HP_LOG_ERROR("Unknown swap size unit '%s'", end);
+            return 0;
+        }
+    }
+    *success = true;
+    ret = (int64_t) converted * factor;
+    return ret;
+}
+
+size_t hp_count_chr(const char *haystack, char needle)
+{
+	size_t occurances = 0;
+
+	while (*haystack != '\0') {
+		if (*(haystack++) == needle) {
+			occurances++;
+		}
+	}
+	return occurances;
 }

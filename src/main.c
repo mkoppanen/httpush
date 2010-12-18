@@ -50,7 +50,7 @@ static void show_help(const char *d)
 	fprintf(stderr, " -z <value>    Comma-separated list of 0MQ URIs to connect to\n");
 }
 
-void signal_handler(int sig) {
+static void signal_handler(int sig) {
 
     switch(sig) {
         case SIGHUP:
@@ -64,7 +64,7 @@ void signal_handler(int sig) {
     }
 }
 
-void background() 
+static bool background() 
 {
 	pid_t pid, sid;
 
@@ -74,12 +74,12 @@ void background()
 
     if (pid < 0) {
 		HP_LOG_ERROR("Failed to fork: %s", strerror(errno));
-        exit(EXIT_FAILURE);
+        return false;
     }
 
 	/* Exit parent */
     if (pid > 0) {
-        exit(EXIT_SUCCESS);
+        return false;
     }
 
     /* Change the file mode mask */
@@ -88,100 +88,103 @@ void background()
     /* Create a new SID for the child process */
     sid = setsid();
     if (sid < 0) {
-        fprintf(stderr, "setsid failed: %s", strerror(errno));
-        exit(EXIT_FAILURE);
+        HP_LOG_ERROR("setsid failed: %s", strerror(errno));
+        return false;
     }
 
     (void) freopen("/dev/null", "r", stdin);
     (void) freopen("/dev/null", "w", stdout);
     (void) freopen("/dev/null", "w", stderr);
+
+    return true;
 }
 
-static char **parse_dsn(const char *param, size_t *num)
+static struct httpush_uri_t **parse_dsn(const char *param, size_t *num)
 {
-	char *ptr, *pch, **retval = NULL;
+    size_t num_dsn = 0;
+    bool success = true;
+	char *tmp, *pch, *last = NULL;
+    struct httpush_uri_t **retval = NULL;
 
 	*num = 0;
 
-	ptr = strdup(param);
-	pch = strtok(ptr, ", ");
+    /* How many? */
+    num_dsn = (hp_count_chr(param, ',') + 1);
+    retval  = calloc(num_dsn, sizeof(struct httpush_uri_t *));
 
+    // calloc failed
+    if (!retval) {
+        HP_LOG_ERROR("Failed to allocate memory: %s", strerror(errno));
+        return NULL;
+    }
+
+	tmp = strdup(param);
+	if (!tmp) {
+	    HP_LOG_ERROR("Failed to allocate memory: %s", strerror(errno));
+        return NULL;
+	}
+
+	pch = strtok_r(tmp, ", ", &last);
 	if (!pch) {
-		free(ptr);
+		free(tmp);
 		return NULL;
 	}
 
 	while (pch) {
-        retval = realloc(retval, (*num + 1) * sizeof(char *));
-		retval[(*num)++] = strdup(pch);
-		pch = strtok(NULL, ", ");
+        struct httpush_uri_t *uri_ptr;
+
+        uri_ptr = hp_parse_uri(pch);
+        if (!uri_ptr) {
+            success = false;
+            break;
+        }
+
+		retval[(*num)++] = uri_ptr;
+		pch              = strtok_r(NULL, ", ", &last);
 	}
-	free(ptr);
+    free(tmp);
+
+	if (!success && *num > 0) {
+        size_t i;
+        for (i = 0; i < *num; i++) {
+            free(retval[i]);
+        }
+        free(retval);
+        *num = 0;
+	}
 	return retval;
 }
 
-bool drop_privileges(const char *to_user, const char *to_group)
+static bool drop_privileges(const char *to_user, const char *to_group)
 {
     struct passwd *resolved_user = NULL;
     struct group *resolved_group = NULL;
 
     resolved_group = getgrnam(to_group);
     if (!resolved_group) {
-        fprintf(stderr, "Failed to drop privileges. The group(%s) does not exist\n", to_group);
+        HP_LOG_ERROR("Failed to drop privileges. The group(%s) does not exist", to_group);
         return false;
     }
 
     resolved_user = getpwnam(to_user);
     if (!resolved_user) {
-        fprintf(stderr, "Failed to drop privileges. The user(%s) does not exist\n", to_user);
+        HP_LOG_ERROR("Failed to drop privileges. The user(%s) does not exist", to_user);
         return false;
     }
 
     if (setegid(resolved_group->gr_gid) != 0) {
-        fprintf(stderr, "could not set egid to %s: %s\n", to_group, strerror(errno));
+        HP_LOG_ERROR("could not set egid to %s: %s", to_group, strerror(errno));
         return false;
     }
 
     if (seteuid(resolved_user->pw_uid) != 0) {
-        fprintf(stderr, "could not set euid to %s: %s\n", to_user, strerror(errno));
+        HP_LOG_ERROR("could not set euid to %s: %s", to_user, strerror(errno));
         return false;
     }
     return true;
 }
 
-static int64_t unit_to_bytes(const char *expression)
-{
-    int64_t ret;
-
-    char *end = NULL;
-    long converted, factor = 1;
-
-    converted = strtol(expression, &end, 0);
-
-    /* Failed */
-    if (ERANGE == errno || end == expression) {
-        return 0;
-    }
-
-    if (*end) {
-        if (*end == 'G' || *end == 'g') {
-            factor = 1024 * 1024 * 1024;
-        } else if (*end == 'M' || *end == 'm') {
-            factor = 1024 * 1024;
-        } else if (*end == 'K' || *end == 'k') {
-            factor = 1024;
-        } else if (*end == 'B' || *end == 'b') { 
-            /* Noop */
-        } else {
-            fprintf(stderr, "Unknown swap size unit '%s'\n", end);
-            exit(1);
-        }
-    }
-    ret = (int64_t) converted * factor;
-    return ret;
-}
-
-bool change_working_directory()
+static bool change_working_directory()
 {
     const char *tmp;
 
@@ -197,6 +200,57 @@ bool change_working_directory()
     return true;
 }
 
+static int create_listen_socket(const char *ip, const char *port)
+{
+    struct addrinfo *res, hints;
+    int rc, sockfd;
+
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (!ip)
+        hints.ai_flags = AI_PASSIVE;
+
+    rc = getaddrinfo(ip, port, &hints, &res);
+    if (rc) {
+        HP_LOG_ERROR("getaddrinfo failed: %s", gai_strerror(rc));
+        return -1;
+    }
+
+    sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sockfd < 0) {
+        HP_LOG_ERROR("failed to create socket: %s", strerror(errno));
+        freeaddrinfo(res);
+        return -1;
+    }
+
+    rc = bind(sockfd, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+
+    if (rc) {
+        (void) close(sockfd);
+        HP_LOG_ERROR("bind failed: %s", strerror(errno));
+        return -1;
+    }
+
+    rc = fcntl(sockfd, F_SETFL, O_NONBLOCK);
+    if (rc) {
+        (void) close(sockfd);
+        HP_LOG_ERROR("fcntl failed: %s", strerror(errno));
+        return -1;
+    }
+
+    rc = listen(sockfd, 1024);
+    if (rc) {
+        (void) close(sockfd);
+        HP_LOG_ERROR("listen failed: %s", strerror(errno));
+        return -1;
+    }
+
+    return sockfd;
+}
 
 int main(int argc, char **argv)
 {
@@ -204,26 +258,28 @@ int main(int argc, char **argv)
 	const char *user = "nobody";
 	const char *group = "nobody";
 
+    const char *http_host = NULL;
+    const char *http_port = "8080";
+
 	int c, rc, io_threads = 1;
 	struct httpush_args_t args = {0};
 
     bool daemonize = false;
 
-	args.ctx        = NULL;
-	args.http_host  = "0.0.0.0";
-	args.http_port  = 8080;
-	args.num_dsn    = 0;
-    args.hwm        = 0;
-    args.swap       = 0;
+	args.ctx       = NULL;
+	args.httpd_fd  = -1;
+	args.num_dsn   = 0;
+    args.hwm       = 0;
+    args.swap      = 0;
     args.include_headers = true;
 
 	opterr = 0;
 
-	while ((c = getopt (argc, argv, "bd:g:i:l:op:s:u:z:")) != -1) {
+	while ((c = getopt (argc, argv, "b:dg:i:l:op:s:u:z:")) != -1) {
 		switch (c) {
 
 			case 'b':
-				args.http_host = optarg;
+				http_host = optarg;
 			break;
 
 			case 'd':
@@ -237,7 +293,7 @@ int main(int argc, char **argv)
 			case 'i':
 				io_threads = atoi(optarg);
 				if (io_threads < 1) {
-					fprintf(stderr, "Option -i argument must be a positive integer");
+					HP_LOG_ERROR("Option -i argument must be a positive integer");
 					exit(1);
 				}
 			break;
@@ -251,11 +307,18 @@ int main(int argc, char **argv)
 			break;
 
 			case 'p':
-				args.http_port = atoi(optarg);
+				http_port = optarg;
 			break;
 
 			case 's':
-			    args.swap = unit_to_bytes(optarg);
+                {
+                    bool success;
+			        args.swap = hp_unit_to_bytes(optarg, &success);
+                    if (!success) {
+                        HP_LOG_ERROR("Failed to set swap size");
+                        exit(1);
+                    }
+                }
             break;
 
 			case 'u':
@@ -282,18 +345,24 @@ int main(int argc, char **argv)
 		}
 	}
 
+    args.httpd_fd = create_listen_socket(http_host, http_port);
+    if (args.httpd_fd == -1) {
+        exit(1);
+    }
+
 	if (drop_privileges(user, group) == false) {
 		exit(1);
 	}
 
 	if (!args.num_dsn) {
+	    // Set the default dsn
 		args.dsn = parse_dsn("tcp://127.0.0.1:5555", &(args.num_dsn));
 	}
 
-	fprintf(stderr, "HTTP listen: %s:%d\n", args.http_host, args.http_port);
+	HP_LOG_INFO("HTTP listen: %s:%s", http_host, http_port);
 
 	if (daemonize) {
-		fprintf(stderr, "Launching into background..\n");
+		HP_LOG_DEBUG("Launching into background..");
 	}
 
 	signal(SIGHUP, signal_handler);
@@ -305,7 +374,9 @@ int main(int argc, char **argv)
 	signal(SIGPIPE, SIG_IGN);
 
     if (daemonize) {
-		background();
+		if (background() == false) {
+            exit(1);
+		}
     }
 
     /* Change the current working directory */
@@ -318,7 +389,7 @@ int main(int argc, char **argv)
 	args.ctx = zmq_init(io_threads);
 
 	if (!args.ctx) {
-		HP_LOG_ERROR("Failed to initialize zmq context: %s\n", zmq_strerror(errno));
+		HP_LOG_ERROR("Failed to initialize zmq context: %s", zmq_strerror(errno));
 		exit(1);
 	}
 
@@ -332,9 +403,12 @@ int main(int argc, char **argv)
         free(args.dsn);
     }
 
+    HP_LOG_DEBUG("Closing all sockets");
+    hp_socket_list_free();
+
     HP_LOG_DEBUG("Terminating zmq context");
     zmq_term(args.ctx);
 
-    HP_LOG_WARN("Terminating process");
+    HP_LOG_INFO("Terminating process");
     exit(rc);
 }

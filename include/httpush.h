@@ -60,21 +60,30 @@
 #include <zmq.h>
 #include <syslog.h>
 
-struct httpush_zdsn_t {
-	char **dsn;
-	size_t num_dsn;
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <fcntl.h>
+
+
+struct httpush_uri_t {
+    char *uri;
+    
+	uint64_t hwm;
+	bool hwm_set;
+	
+    int64_t swap;
+	bool swap_set;
 };
 
 struct httpush_args_t {
 	/* 0MQ context */
 	void *ctx;
-	
-	/* http host and port */
-	const char *http_host;
-	int http_port;
+
+	int httpd_fd;
 	
 	/* 0MQ backend uri */
-	char **dsn;
+	struct httpush_uri_t **dsn;
 	size_t num_dsn;
 	
 	/* 0MQ HWM */
@@ -85,16 +94,23 @@ struct httpush_args_t {
 	
 	/* Whether to include headers in the messages */
 	bool include_headers;
+	
 };
 
 struct httpush_device_args_t {
 	void *ctx;
+	
 	uint64_t hwm;  
+	
 	int64_t swap;
-	char **dsn;
+	
+	struct httpush_uri_t **dsn;
 	size_t num_dsn;
+	
 	void *in_socket;
+	
 	void *out_socket;
+	
 	void *intercomm;
 };
 
@@ -108,11 +124,8 @@ struct httpush_httpd_args_t {
     /* Socket to communicate with device */
     void *device;
 
-    /* Http bind host */
-    const char *http_host;
-
-    /* Http bind port */
-    int http_port;
+    /* Http fd */
+    int httpd_fd;
 
     struct event_base *base;
 
@@ -131,12 +144,15 @@ struct httpush_pair_t {
 #define HP_SEC_TO_MSEC(sec_) (sec_ * 1000000)
 
 #ifdef DEBUG
-#	define HP_LOG_ERROR(...) fprintf(stderr, "ERROR: ");   fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
-#	define HP_LOG_WARN(...)  fprintf(stderr, "WARNING: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
-#	define HP_LOG_DEBUG(...) fprintf(stderr, "DEBUG: ");   fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
+#   define HP_DO_LOG(level_, ...) fprintf(stderr, level_);   fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
+#	define HP_LOG_ERROR(...) HP_DO_LOG("ERROR: ", __VA_ARGS__);
+#	define HP_LOG_WARN(...)  HP_DO_LOG("WARNING: ", __VA_ARGS__);
+#	define HP_LOG_INFO(...)  HP_DO_LOG("INFO: ", __VA_ARGS__);
+#	define HP_LOG_DEBUG(...) HP_DO_LOG("DEBUG: ", __VA_ARGS__);
 #else
 #	define HP_LOG_ERROR(...) syslog(LOG_ERR, __VA_ARGS__);
 #	define HP_LOG_WARN(...)  syslog(LOG_WARNING, __VA_ARGS__);
+#	define HP_LOG_INFO(...)  syslog(LOG_INFO, __VA_ARGS__);
 #	define HP_LOG_DEBUG(...)
 #endif
 
@@ -149,12 +165,12 @@ typedef enum _httpush_msg_t {
 	DEVICE_SHUTDOWN
 } httpush_msg_t;
 
-int hp_sendmsg(void *socket, const void *message, size_t message_len, int flags);
-int hp_recvmsg(void *socket, void **message, size_t *message_len, int flags);
+bool hp_sendmsg(void *socket, const void *message, size_t message_len, int flags);
+bool hp_recvmsg(void *socket, void **message, size_t *message_len, int flags);
 
 void *hp_socket(void *context, int type, const char *dsn);
 
-int hp_intercomm_send(void *socket, httpush_msg_t inproc_msg);
+bool hp_intercomm_send(void *socket, httpush_msg_t inproc_msg);
 bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout);
 
 int server_boostrap(struct httpush_args_t *args);
@@ -168,6 +184,12 @@ bool hp_create_device(pthread_t *thread, void *thread_args);
 bool hp_create_httpd(pthread_t *thread, struct httpush_httpd_args_t *httpd_args);
 
 bool hp_create_pair(void *context, const char *dsn, struct httpush_pair_t *pair);
+
+struct httpush_uri_t *hp_parse_uri(const char *uri);
+
+int64_t hp_unit_to_bytes(const char *expression, bool *success);
+
+size_t hp_count_chr(const char *haystack, char needle);
 
 
 #endif /* __HTTPUSH_H__ */

@@ -37,14 +37,16 @@ static void *hp_device_thread(void *thread_args)
 
     int64_t more;
     size_t moresz;
-    zmq_pollitem_t items [3];
+    zmq_pollitem_t items [2];
 
     struct httpush_device_args_t *args = (struct httpush_device_args_t *) thread_args;
 
     rc = zmq_msg_init (&msg);
 
     if (rc != 0) {
-        hp_intercomm_send(args->intercomm, DEVICE_FAIL);
+        if (hp_intercomm_send(args->intercomm, DEVICE_FAIL) == false) {
+            HP_LOG_ERROR("Failed to indicate device failure: %s", zmq_strerror(errno));
+        }
         return NULL;
     }
 
@@ -53,24 +55,20 @@ static void *hp_device_thread(void *thread_args)
     items [0].events  = ZMQ_POLLIN;
     items [0].revents = 0;
 
-    items [1].socket  = args->out_socket;
+    items [1].socket  = args->intercomm;
     items [1].fd      = 0;
     items [1].events  = ZMQ_POLLIN;
     items [1].revents = 0;
-
-    items [2].socket  = args->intercomm;
-    items [2].fd      = 0;
-    items [2].events  = ZMQ_POLLIN;
-    items [2].revents = 0;
 
     hp_intercomm_send(args->intercomm, DEVICE_READY);
 
     while (true) {
 
         //  Wait while there are either requests or replies to process.
-        rc = zmq_poll(items, 3, HP_SEC_TO_MSEC(1));
+        rc = zmq_poll(items, 2, HP_SEC_TO_MSEC(1));
         if (rc < 0) {
             zmq_msg_close(&msg);
+            hp_intercomm_send(args->intercomm, DEVICE_FAIL);
             return NULL;
         }
 
@@ -85,6 +83,7 @@ static void *hp_device_thread(void *thread_args)
                 rc = zmq_recv(args->in_socket, &msg, 0);
                 if (rc < 0) {
                     zmq_msg_close(&msg);
+                    hp_intercomm_send(args->intercomm, DEVICE_FAIL);
                     return NULL;
                 }
 
@@ -92,41 +91,17 @@ static void *hp_device_thread(void *thread_args)
                 rc = zmq_getsockopt(args->in_socket, ZMQ_RCVMORE, &more, &moresz);
                 if (rc < 0) {
                     zmq_msg_close(&msg);
+                    hp_intercomm_send(args->intercomm, DEVICE_FAIL);
                     return NULL;
                 }
 
-                /* XXX: non-blocking send and store to file if fails */
-
-                rc = zmq_send(args->out_socket, &msg, more ? ZMQ_SNDMORE : 0);
-                if (rc < 0) {
-                    zmq_msg_close(&msg);
-                    return NULL;
+                rc = zmq_send(args->out_socket, &msg, ((more ? ZMQ_SNDMORE : 0) | ZMQ_NOBLOCK));
+                if (rc != 0 && errno == EAGAIN) {
+                    HP_LOG_WARN("Overflow of messages in device, messages will be discarded");
+                    rc = 0;
                 }
-
-                if (!more)
-                    break;
-            }
-        }
-
-        //  Process a reply.
-        if (items[1].revents & ZMQ_POLLIN) {
-            while (true) {
-
-                rc = zmq_recv(args->out_socket, &msg, 0);
                 if (rc < 0) {
-                    zmq_msg_close(&msg);
-                    return NULL;
-                }
-
-                moresz = sizeof(more);
-                rc = zmq_getsockopt(args->out_socket, ZMQ_RCVMORE, &more, &moresz);
-                if (rc < 0) {
-                    zmq_msg_close(&msg);
-                    return NULL;
-                }
-
-                rc = zmq_send(args->in_socket, &msg, more ? ZMQ_SNDMORE : 0);
-                if (rc < 0) {
+                    hp_intercomm_send(args->intercomm, DEVICE_FAIL);
                     zmq_msg_close(&msg);
                     return NULL;
                 }
@@ -137,22 +112,19 @@ static void *hp_device_thread(void *thread_args)
         }
 
         /* Messages coming from controlling process */
-        if (items[2].revents & ZMQ_POLLIN) {
-            httpush_msg_t x = 0;
+        if (items[1].revents & ZMQ_POLLIN) {
+            bool time_to_exit = false;
+            HP_LOG_DEBUG("device received intercomm event");
 
-             HP_LOG_DEBUG("device received intercomm event");
-
-            rc = zmq_recv(args->intercomm, &msg, 0);
-            if (rc < 0) {
-                zmq_msg_close(&msg);
-                return NULL;
-            }    
-
-            if (zmq_msg_size(&msg) == sizeof(httpush_msg_t))
-        	    memcpy(&x, zmq_msg_data(&msg), sizeof(httpush_msg_t));
-
-        	if (x == DEVICE_SHUTDOWN)
+            while (true) {
+                if (hp_intercomm_recv(args->intercomm, DEVICE_SHUTDOWN, 1000) == true)  {
+                    time_to_exit = true;
+                    break;
+                }
+            }
+            if (time_to_exit) {
                 break;
+            }
         }
     }
     zmq_msg_close(&msg);
@@ -172,29 +144,36 @@ bool hp_create_device(pthread_t *thread, void *thread_args)
         return false;
 	}
 
-    /* Set socket options */
-    if (args->swap > 0) {
-        rc = zmq_setsockopt(args->out_socket, ZMQ_SWAP, (void *) &(args->swap), sizeof(int64_t));
+    for (i = 0; i < args->num_dsn; i++) {
+        uint64_t hwm = args->hwm;
+        int64_t swap = args->swap;
+
+        /* Override values for individual sockets */
+        if (args->dsn[i]->hwm_set == true) {
+            hwm = args->dsn[i]->hwm;
+        }
+
+        rc = zmq_setsockopt(args->out_socket, ZMQ_HWM, (void *) &hwm, sizeof(uint64_t));
         if (rc != 0) {
-            HP_LOG_WARN("Failed to set swap value: %s", zmq_strerror(errno));
+            HP_LOG_ERROR("Failed to set HWM value: %s", zmq_strerror(errno));
             return false;
         }
-    }
 
-    if (args->hwm > 0) {
-        rc = zmq_setsockopt(args->out_socket, ZMQ_HWM, (void *) &(args->hwm), sizeof(uint64_t));
+        if (args->dsn[i]->swap_set == true) {
+            swap = args->dsn[i]->swap;
+        }
+
+        rc = zmq_setsockopt(args->out_socket, ZMQ_SWAP, (void *) &swap, sizeof(int64_t));
         if (rc != 0) {
-            HP_LOG_WARN("Failed to set HWM value: %s", zmq_strerror(errno));
+            HP_LOG_ERROR("Failed to set swap value: %s", zmq_strerror(errno));
             return false;
         }
-    }
 
-	for (i = 0; i < args->num_dsn; i++) {
-		HP_LOG_DEBUG("Connecting zmq device to: %s", args->dsn[i]);
-		if (zmq_connect(args->out_socket, args->dsn[i]) != 0) {
+        HP_LOG_DEBUG("zmq_connect: %s, swap=[%" PRIi64 "], hwm=[%" PRIu64 "]", args->dsn[i]->uri, swap, hwm);
+		if (zmq_connect(args->out_socket, args->dsn[i]->uri) != 0) {
 			return false;
 		}
-	}
+    }
 
 	if (pthread_create(thread, NULL, hp_device_thread, (void *) args) != 0) {
 		HP_LOG_ERROR("Failed to create zmq device thread: %s", strerror(errno));
