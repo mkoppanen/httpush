@@ -66,79 +66,74 @@
 #include <fcntl.h>
 
 
-struct httpush_uri_t {
+struct hp_uri_t {
     char *uri;
     
 	uint64_t hwm;
-	bool hwm_set;
 	
     int64_t swap;
-	bool swap_set;
+
+	int linger;
 };
 
 struct httpush_args_t {
 	/* 0MQ context */
 	void *ctx;
 
-	int httpd_fd;
+	int fd;
 	
 	/* 0MQ backend uri */
-	struct httpush_uri_t **dsn;
-	size_t num_dsn;
-	
-	/* 0MQ HWM */
-	uint64_t hwm;
-	
-	/* 0MQ swap */
-	int64_t swap;
-	
-	/* Whether to include headers in the messages */
-	bool include_headers;
-	
-};
-
-struct httpush_device_args_t {
-	void *ctx;
-	
-	uint64_t hwm;  
-	
-	int64_t swap;
-	
-	struct httpush_uri_t **dsn;
-	size_t num_dsn;
-	
-	void *in_socket;
-	
-	void *out_socket;
-	
-	void *intercomm;
-};
-
-struct httpush_httpd_args_t {
-    /* 0MQ context */
-    void *ctx;
-
-    /* Socket to communicate with parent */
-    void *intercomm;
-
-    /* Socket to communicate with device */
-    void *device;
-
-    /* Http fd */
-    int httpd_fd;
-
-    struct event_base *base;
-
-    /* If the shutdown event arrives */
-    struct event shutdown;
+	struct hp_uri_t **uris;
+	size_t num_uris;
 
 	/* Whether to include headers in the messages */
 	bool include_headers;
+	
 };
 
-struct httpush_pair_t {
+struct hp_pair_t {
     void *front;
     void *back;
+};
+
+struct hp_httpd_counters_t {
+	uint64_t code_200;
+             
+	uint64_t code_404;
+             
+	uint64_t code_412;
+             
+	uint64_t code_503;
+             
+	uint64_t requests;
+};
+
+struct hp_httpd_thread_t {
+	/* Thead id */
+	int thread_id;
+	
+    /* The thread */
+    pthread_t thread;
+
+	struct hp_pair_t intercomm;
+
+    /* Socket to communicate with device */
+    void *out_socket;
+
+	/* Whether to include headers in the messages */
+	bool include_headers;
+
+	/* Base structure */
+    struct event_base *base;
+
+    /* httpd structure */
+    struct evhttp *httpd;
+
+    /* If the shutdown event arrives */
+    struct event intercomm_ev;
+
+	/* Counters for the current thread */
+	struct hp_httpd_counters_t counters;
 };
 
 #define HP_SEC_TO_MSEC(sec_) (sec_ * 1000000)
@@ -160,36 +155,35 @@ typedef enum _httpush_msg_t {
 	HTTPD_READY = 10,
 	HTTPD_FAIL,
 	HTTPD_SHUTDOWN,
-	DEVICE_READY,
-	DEVICE_FAIL,
-	DEVICE_SHUTDOWN
+	HTTPD_STATS,
+	MONITOR_STATS
 } httpush_msg_t;
 
 bool hp_sendmsg(void *socket, const void *message, size_t message_len, int flags);
 bool hp_recvmsg(void *socket, void **message, size_t *message_len, int flags);
 
-void *hp_socket(void *context, int type, const char *dsn);
-
 bool hp_intercomm_send(void *socket, httpush_msg_t inproc_msg);
 bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout);
 
-int server_boostrap(struct httpush_args_t *args);
+bool hp_intercomm_recv_cmd(void *socket, httpush_msg_t *cmd, long timeout);
 
-void *start_device_thread(void *thread_args);
 
-void hp_socket_list_free();
+bool hp_create_pair(void *context, struct hp_pair_t *pair, int pair_id);
 
-bool hp_create_device(pthread_t *thread, void *thread_args);
+int hp_server_boostrap(struct httpush_args_t *args, int http_threads);
 
-bool hp_create_httpd(pthread_t *thread, struct httpush_httpd_args_t *httpd_args);
+void hp_httpd_intercomm_cb(int fd, short event, void *args);
 
-bool hp_create_pair(void *context, const char *dsn, struct httpush_pair_t *pair);
-
-struct httpush_uri_t *hp_parse_uri(const char *uri);
+struct hp_uri_t *hp_parse_uri(const char *uri, int64_t default_hwm, uint64_t default_swap);
 
 int64_t hp_unit_to_bytes(const char *expression, bool *success);
 
 size_t hp_count_chr(const char *haystack, char needle);
+
+void hp_httpd_publish_message(struct evhttp_request *req, void *args);
+void hp_httpd_reflect_request(struct evhttp_request *req, void *param);
+
+int hp_create_listen_socket(const char *ip, const char *port);
 
 
 #endif /* __HTTPUSH_H__ */

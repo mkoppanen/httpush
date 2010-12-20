@@ -30,10 +30,6 @@
 
 #include "httpush.h"
 
-/* Keep track of sockets so they can be freed before terminating context */
-static void **allocated_sockets = NULL;
-static size_t num_allocated_sockets = 0;
-
 /**
  * Wrapper for sending messages to 0MQ socket
  * Returns 0 on success and <> 0 on failure
@@ -64,6 +60,9 @@ bool hp_recvmsg(void *socket, void **message, size_t *message_len, int flags)
 {
 	int rc;
 	zmq_msg_t msg;
+    size_t msg_max_len = *message_len;
+
+    *message_len = 0;
 
 	rc = zmq_msg_init(&msg);
 	if (rc != 0)
@@ -75,6 +74,12 @@ bool hp_recvmsg(void *socket, void **message, size_t *message_len, int flags)
 		zmq_msg_close(&msg);
 		return false;
 	}
+
+	if (msg_max_len > 0 && zmq_msg_size(&msg) > msg_max_len) {
+	    zmq_msg_close(&msg);
+		return false;
+	}
+
 	*message = malloc(zmq_msg_size(&msg));
 
 	if (!*message) {
@@ -89,19 +94,12 @@ bool hp_recvmsg(void *socket, void **message, size_t *message_len, int flags)
     return true;
 }
 
-#define tv_to_msec(tv_) (((tv_)->tv_sec * 1000 * 1000) + (tv_)->tv_usec)
-
-/**
- * Receive a message from the intercomm. The message contains 
- * httpush_msg_t incating an event (such as HTTPD_READY) on the child
- * Returns true if a message was received and matches inproc_msg param
- * Returns false on failure
- */
-bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout)
+bool hp_intercomm_recv_cmd(void *socket, httpush_msg_t *cmd, long timeout)
 {
     int rc;
     zmq_pollitem_t items[1];
-	httpush_msg_t x = 0;
+
+    *cmd = 0;
 
     items[0].socket = socket;
     items[0].events = ZMQ_POLLIN;
@@ -125,12 +123,25 @@ bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout)
     		zmq_msg_close(&msg);
     		return false;
     	}
-    	if (zmq_msg_size(&msg) == sizeof(httpush_msg_t))
-    	    memcpy(&x, zmq_msg_data(&msg), sizeof(httpush_msg_t));
+
+    	if (zmq_msg_size(&msg) == sizeof(httpush_msg_t)) {
+    	    memcpy(cmd, zmq_msg_data(&msg), sizeof(httpush_msg_t));
+        }
 
     	zmq_msg_close(&msg);
     }
-	return (x == expected_msg);
+	return cmd;
+}
+
+
+bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout)
+{
+    httpush_msg_t received;
+
+    if (hp_intercomm_recv_cmd(socket, &received, timeout) == false) {
+        return false;
+    }
+	return (received == expected_msg);
 }
 
 /** 
@@ -144,76 +155,53 @@ bool hp_intercomm_send(void *socket, httpush_msg_t inproc_msg)
 	                    sizeof(httpush_msg_t), ZMQ_NOBLOCK);
 }
 
-/**
- * Wrapper for creating PUSH and PULL sockets
- * PULL sockets will bind to 'dsn'
- * PUSH sockets will connect to 'dsn' (passing NULL is ok)
- * Returns the newly created socket or NULL on failure
- */
-void *hp_socket(void *context, int type, const char *dsn)
-{
-	int rc = 0;
-	void *socket = NULL;
-    int linger = 2000;
-
-	socket = zmq_socket(context, type);
-
-	if (socket && dsn) {
-		switch (type) {
-			case ZMQ_PUSH:
-				rc = zmq_connect(socket, dsn);
-			break;
-
-			case ZMQ_PULL:
-				rc = zmq_bind(socket, dsn);
-			break;
-		}
-		if (rc != 0) {
-			zmq_close(socket);
-			socket = NULL;
-		}
-	}
-	/* Set linger on all sockets we send out 
-	    TODO: configurable value
-	*/
-    rc = zmq_setsockopt(socket, ZMQ_LINGER, &linger, sizeof(int));
-    if (rc != 0) {
-        HP_LOG_WARN("Failed to set linger value: %s", zmq_strerror(errno));
-    }
-
-    ++num_allocated_sockets;
-    allocated_sockets = realloc(allocated_sockets, num_allocated_sockets * sizeof(void *));
-    allocated_sockets[num_allocated_sockets - 1] = socket;
-	return socket;
-}
-
-bool hp_create_pair(void *context, const char *dsn, struct httpush_pair_t *pair)
+bool hp_create_pair(void *context, struct hp_pair_t *pair, int pair_id)
 {
     int rc;
+    char pair_uri[48];
 
-    pair->front = hp_socket(context, ZMQ_PAIR, NULL);
-    if (!pair->front)
-        return false;
+    pair->front = NULL;
+    pair->back  = NULL;
 
-    rc = zmq_bind(pair->front, dsn);
-    if (rc != 0)
-        return false;
+    /* Create uri for the pair socket */
+    (void) snprintf(pair_uri, 48, "inproc://httpush/pair-%d", pair_id);
 
-    pair->back = hp_socket(context, ZMQ_PAIR, NULL);
-    if (!pair->back)
-        return false;
+    pair->front = zmq_socket(context, ZMQ_PAIR);
+    if (!pair->front) {
+        goto return_error;
+    }
 
-    rc = zmq_connect(pair->back, dsn);
-    if (rc != 0)
-        return false;
+    rc = zmq_bind(pair->front, pair_uri);
+    if (rc != 0) {
+        goto return_error;
+    }
+
+    pair->back = zmq_socket(context, ZMQ_PAIR);
+    if (!pair->back) {
+        goto return_error;
+    }
+
+    rc = zmq_connect(pair->back, pair_uri);
+    if (rc != 0) {
+        goto return_error;
+    }
 
     return true;
+
+return_error:
+    if (pair->back)
+        (void) zmq_close(pair->back);
+
+    if (pair->front)
+        (void) zmq_close(pair->front);
+
+    return false;
 }
 
-struct httpush_uri_t *hp_parse_uri(const char *uri)
+struct hp_uri_t *hp_parse_uri(const char *uri, int64_t default_hwm, uint64_t default_swap)
 {
     char *pch, *ptr, *last = NULL;
-    struct httpush_uri_t *retval;
+    struct hp_uri_t *retval;
 
     struct evkeyval *item;
     struct evkeyvalq *q;
@@ -221,12 +209,10 @@ struct httpush_uri_t *hp_parse_uri(const char *uri)
     struct evkeyvalq params;
     evhttp_parse_query(uri, &params);
 
-    retval           = malloc(sizeof(*retval));
-    retval->swap     = 0;
-    retval->swap_set = false;
-
-    retval->hwm     = 0;
-    retval->hwm_set = false;
+    retval         = malloc(sizeof(*retval));
+    retval->swap   = default_swap;
+    retval->hwm    = default_hwm;
+    retval->linger = 2000;
 
     ptr = strdup(uri);
     if (!ptr)
@@ -244,34 +230,20 @@ struct httpush_uri_t *hp_parse_uri(const char *uri)
     TAILQ_FOREACH(item, q, next) {
         if (!strcmp(item->key, "swap")) {
             bool success;
-            retval->swap     = (int64_t) hp_unit_to_bytes(item->value, &success);
+            retval->swap = (int64_t) hp_unit_to_bytes(item->value, &success);
+
             if (!success)
                 return NULL;
 
-            retval->swap_set = true;
         } else if (!strcmp(item->key, "hwm")) {
-            retval->hwm     = (uint64_t) atoi(item->value);
-            retval->hwm_set = true;
+            retval->hwm = (uint64_t) atoi(item->value);
+        } else if (!strcmp(item->key, "linger")) {
+            retval->linger = atoi(item->value);
         }
     }
     free(ptr);
+    evhttp_clear_headers(&params);
     return retval;
-}
-
-void hp_socket_list_free() 
-{
-    size_t i;
-
-    if (!num_allocated_sockets)
-        return;
-
-    for (i = 0; i < num_allocated_sockets; i++) {
-        int rc = zmq_close(allocated_sockets[i]);
-        if (rc != 0) {
-            HP_LOG_WARN("Failed to close socket");
-        }
-    }
-    free(allocated_sockets);
 }
 
 int64_t hp_unit_to_bytes(const char *expression, bool *success)
@@ -319,4 +291,62 @@ size_t hp_count_chr(const char *haystack, char needle)
 		}
 	}
 	return occurances;
+}
+
+int hp_create_listen_socket(const char *ip, const char *port)
+{
+    struct addrinfo *res, hints;
+    int rc, sockfd, reuse = 1;
+
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (!ip)
+        hints.ai_flags = AI_PASSIVE;
+
+    rc = getaddrinfo(ip, port, &hints, &res);
+    if (rc != 0) {
+        HP_LOG_ERROR("getaddrinfo failed: %s", gai_strerror(rc));
+        return -1;
+    }
+
+    sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sockfd < 0) {
+        HP_LOG_ERROR("failed to create socket: %s", strerror(errno));
+        freeaddrinfo(res);
+        return -1;
+    }
+
+    rc = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int));
+    if (rc != 0) {
+        HP_LOG_ERROR("failed to set SO_REUSEADDR: %s", strerror(errno));
+        freeaddrinfo(res);
+        return -1;
+    }
+
+    rc = bind(sockfd, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+
+    if (rc != 0) {
+        (void) close(sockfd);
+        HP_LOG_ERROR("bind failed: %s", strerror(errno));
+        return -1;
+    }
+
+    rc = evutil_make_socket_nonblocking(sockfd);
+    if (rc != 0) {
+        (void) close(sockfd);
+        HP_LOG_ERROR("fcntl failed: %s", strerror(errno));
+        return -1;
+    }
+
+    rc = listen(sockfd, 1024);
+    if (rc == -1) {
+        (void) close(sockfd);
+        HP_LOG_ERROR("listen failed: %s", strerror(errno));
+        return -1;
+    }
+    return sockfd;
 }

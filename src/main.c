@@ -41,13 +41,15 @@ static void show_help(const char *d)
 	fprintf(stderr, " -b <value>    Hostname or ip to for the HTTP daemon\n");
     fprintf(stderr, " -d            Daemonize the program\n");
 	fprintf(stderr, " -g <value>    Group to run as\n");
-	fprintf(stderr, " -i <value>    Number of 0MQ IO threads\n");
-	fprintf(stderr, " -l <value>    The 0MQ high watermark limit\n");
+	fprintf(stderr, " -i <value>    Number of zeromq IO threads\n");
+	fprintf(stderr, " -l <value>    Linger value for zeromq sockets\n");
 	fprintf(stderr, " -o            Optimize for bandwidth usage (exclude headers from messages)\n");
 	fprintf(stderr, " -p <value>    HTTP listen port\n");
 	fprintf(stderr, " -s <value>    Disk offload size (G/M/k/B)\n");
+	fprintf(stderr, " -t <value>    Number of httpd threads\n");
 	fprintf(stderr, " -u <value>    User to run as\n");
-	fprintf(stderr, " -z <value>    Comma-separated list of 0MQ URIs to connect to\n");
+	fprintf(stderr, " -w <value>    The 0MQ high watermark limit\n");
+	fprintf(stderr, " -z <value>    Comma-separated list of zeromq URIs to connect to\n");
 }
 
 static void signal_handler(int sig) {
@@ -99,12 +101,12 @@ static bool background()
     return true;
 }
 
-static struct httpush_uri_t **parse_dsn(const char *param, size_t *num)
+static struct hp_uri_t **parse_dsn(const char *param, size_t *num, int64_t default_hwm, uint64_t default_swap)
 {
     size_t num_dsn = 0;
     bool success = true;
 	char *tmp, *pch, *last = NULL;
-    struct httpush_uri_t **retval = NULL;
+    struct hp_uri_t **retval = NULL;
 
 	*num = 0;
 
@@ -131,9 +133,9 @@ static struct httpush_uri_t **parse_dsn(const char *param, size_t *num)
 	}
 
 	while (pch) {
-        struct httpush_uri_t *uri_ptr;
+        struct hp_uri_t *uri_ptr;
 
-        uri_ptr = hp_parse_uri(pch);
+        uri_ptr = hp_parse_uri(pch, default_hwm, default_swap);
         if (!uri_ptr) {
             success = false;
             break;
@@ -200,82 +202,41 @@ static bool change_working_directory()
     return true;
 }
 
-static int create_listen_socket(const char *ip, const char *port)
-{
-    struct addrinfo *res, hints;
-    int rc, sockfd;
-
-    memset(&hints, 0, sizeof(hints));
-
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    if (!ip)
-        hints.ai_flags = AI_PASSIVE;
-
-    rc = getaddrinfo(ip, port, &hints, &res);
-    if (rc) {
-        HP_LOG_ERROR("getaddrinfo failed: %s", gai_strerror(rc));
-        return -1;
-    }
-
-    sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sockfd < 0) {
-        HP_LOG_ERROR("failed to create socket: %s", strerror(errno));
-        freeaddrinfo(res);
-        return -1;
-    }
-
-    rc = bind(sockfd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-
-    if (rc) {
-        (void) close(sockfd);
-        HP_LOG_ERROR("bind failed: %s", strerror(errno));
-        return -1;
-    }
-
-    rc = fcntl(sockfd, F_SETFL, O_NONBLOCK);
-    if (rc) {
-        (void) close(sockfd);
-        HP_LOG_ERROR("fcntl failed: %s", strerror(errno));
-        return -1;
-    }
-
-    rc = listen(sockfd, 1024);
-    if (rc) {
-        (void) close(sockfd);
-        HP_LOG_ERROR("listen failed: %s", strerror(errno));
-        return -1;
-    }
-
-    return sockfd;
-}
-
 int main(int argc, char **argv)
 {
     size_t i;
+
+    /* -- start default values -- */
+
+    const char *zmq_dsn = "tcp://127.0.0.1:5555";
+
 	const char *user = "nobody";
 	const char *group = "nobody";
 
     const char *http_host = NULL;
     const char *http_port = "8080";
 
-	int c, rc, io_threads = 1;
-	struct httpush_args_t args = {0};
+    uint64_t hwm = 0;
+    int64_t swap = 0;
+
+    int io_threads = 1;
+    int linger = 2000;
+    int http_threads = 5;
 
     bool daemonize = false;
 
-	args.ctx       = NULL;
-	args.httpd_fd  = -1;
-	args.num_dsn   = 0;
-    args.hwm       = 0;
-    args.swap      = 0;
+    /* -- end default values --- */
+
+	int c, rc;
+	struct httpush_args_t args = {0};
+
+	args.ctx             = NULL;
+	args.fd              = -1;
     args.include_headers = true;
 
 	opterr = 0;
 
-	while ((c = getopt (argc, argv, "b:dg:i:l:op:s:u:z:")) != -1) {
+	while ((c = getopt (argc, argv, "b:dg:i:l:op:s:u:w:z:")) != -1) {
 		switch (c) {
 
 			case 'b':
@@ -299,7 +260,12 @@ int main(int argc, char **argv)
 			break;
 
 			case 'l':
-                args.hwm = (uint64_t) atoi(optarg);
+                linger = atoi(optarg);
+
+                if (linger < 0) {
+					HP_LOG_ERROR("Option -l argument must be zero or larger");
+					exit(1);
+				}
 			break;
 
 			case 'o':
@@ -313,7 +279,7 @@ int main(int argc, char **argv)
 			case 's':
                 {
                     bool success;
-			        args.swap = hp_unit_to_bytes(optarg, &success);
+			        swap = hp_unit_to_bytes(optarg, &success);
                     if (!success) {
                         HP_LOG_ERROR("Failed to set swap size");
                         exit(1);
@@ -321,17 +287,26 @@ int main(int argc, char **argv)
                 }
             break;
 
+            case 't':
+				http_threads = atoi(optarg);
+			break;
+
 			case 'u':
 				user = optarg;
 			break;
 
+			case 'w':
+			    hwm = (uint64_t) atoi(optarg);
+            break;
+
 			case 'z':
-				args.dsn = parse_dsn(optarg, &(args.num_dsn));
+				zmq_dsn = optarg;
 			break;
 
 			case '?':
-				if (optopt == 'b' || optopt == 'g' || optopt == 'i' ||
-				    optopt == 'p' || optopt == 'u' || optopt == 'z') {
+				if (optopt == 'b' || optopt == 'g' || optopt == 'i' || optopt == 'l' ||
+				    optopt == 'p' || optopt == 's' || optopt == 't' || optopt == 'u' ||
+				    optopt == 'w' || optopt == 'z') {
 					fprintf(stderr, "Option -%c requires an argument.\n", optopt);
 				}
 				show_help(argv[0]);
@@ -345,8 +320,8 @@ int main(int argc, char **argv)
 		}
 	}
 
-    args.httpd_fd = create_listen_socket(http_host, http_port);
-    if (args.httpd_fd == -1) {
+    args.fd = hp_create_listen_socket(http_host, http_port);
+    if (args.fd == -1) {
         exit(1);
     }
 
@@ -354,9 +329,9 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	if (!args.num_dsn) {
-	    // Set the default dsn
-		args.dsn = parse_dsn("tcp://127.0.0.1:5555", &(args.num_dsn));
+	args.uris = parse_dsn(zmq_dsn, &(args.num_uris), hwm, swap);
+	if (!args.uris) {
+        exit(1);
 	}
 
 	HP_LOG_INFO("HTTP listen: %s:%s", http_host, http_port);
@@ -394,17 +369,13 @@ int main(int argc, char **argv)
 	}
 
     /* This call will block */
-	rc = server_boostrap(&args);
+	rc = hp_server_boostrap(&args, http_threads);
 
-    if (args.num_dsn) {
-        for (i = 0; i < args.num_dsn; i++) {
-            free(args.dsn[i]);
-        }
-        free(args.dsn);
+    for (i = 0; i < args.num_uris; i++) {
+        free(args.uris[i]->uri);
+        free(args.uris[i]);
     }
-
-    HP_LOG_DEBUG("Closing all sockets");
-    hp_socket_list_free();
+    free(args.uris);
 
     HP_LOG_DEBUG("Terminating zmq context");
     zmq_term(args.ctx);
