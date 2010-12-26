@@ -26,7 +26,7 @@
 |  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS    |
 |  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.                     |
 +-----------------------------------------------------------------------------------+
-*/
+ */
 
 #include "httpush.h"
 
@@ -35,20 +35,28 @@
  * Returns 0 on success and <> 0 on failure
  * 'errno' should indicate the error 
  */
-bool hp_sendmsg(void *socket, const void *message, size_t message_len, int flags)
-{
-	int rc;
-	zmq_msg_t msg;
+bool hp_sendmsg(void *socket, const void *message, size_t message_len, int flags) {
+    int i = 0, rc;
+    zmq_msg_t msg;
 
-	rc = zmq_msg_init_size(&msg, message_len);
-	if (rc != 0)
+    rc = zmq_msg_init_size(&msg, message_len);
+    if (rc != 0)
         return false;
 
-	memcpy(zmq_msg_data(&msg), message, message_len);
-	rc = zmq_send(socket, &msg, flags);
+    memcpy(zmq_msg_data(&msg), message, message_len);
+    while (++i < 3) {
+        rc = zmq_send(socket, &msg, flags);
+        if (rc == 0)
+            break;
 
-	zmq_msg_close(&msg);
-	return (rc == 0);
+        else if (rc != 0 && errno == EAGAIN)
+            continue;
+
+        break;
+    }
+
+    zmq_msg_close(&msg);
+    return (rc == 0);
 }
 
 /**
@@ -56,53 +64,59 @@ bool hp_sendmsg(void *socket, const void *message, size_t message_len, int flags
  * Returns 0 on success and <> 0 on failure
  * 'errno' should indicate the error 
  */
-bool hp_recvmsg(void *socket, void **message, size_t *message_len, int flags)
-{
-	int rc;
-	zmq_msg_t msg;
+bool hp_recvmsg(void *socket, void **message, size_t *message_len, int flags) {
+    int rc;
+    zmq_msg_t msg;
     size_t msg_max_len = *message_len;
 
     *message_len = 0;
+    *message = NULL;
 
-	rc = zmq_msg_init(&msg);
-	if (rc != 0)
+    rc = zmq_msg_init(&msg);
+    if (rc != 0)
         return false;
 
-	rc = zmq_recv(socket, &msg, flags);
+    rc = zmq_recv(socket, &msg, flags);
 
-	if (rc != 0) {
-		zmq_msg_close(&msg);
-		return false;
-	}
+    if (rc != 0) {
+        zmq_msg_close(&msg);
+        return false;
+    }
 
-	if (msg_max_len > 0 && zmq_msg_size(&msg) > msg_max_len) {
-	    zmq_msg_close(&msg);
-		return false;
-	}
+    if (msg_max_len > 0 && zmq_msg_size(&msg) > msg_max_len) {
+        zmq_msg_close(&msg);
+        return false;
+    }
 
-	*message = malloc(zmq_msg_size(&msg));
+    if (zmq_msg_size(&msg) == 0) {
+        zmq_msg_close(&msg);
+        return true;
+    }
 
-	if (!*message) {
-		zmq_msg_close(&msg);
-		return false;
-	}
+    *message = malloc(zmq_msg_size(&msg));
 
-	memcpy(*message, zmq_msg_data(&msg), zmq_msg_size(&msg));
-	*message_len = zmq_msg_size(&msg);
+    if (!*message) {
+        zmq_msg_close(&msg);
+        return false;
+    }
 
-	zmq_msg_close(&msg);
+    memcpy(*message, zmq_msg_data(&msg), zmq_msg_size(&msg));
+    *message_len = zmq_msg_size(&msg);
+
+    (void) zmq_msg_close(&msg);
     return true;
 }
 
-bool hp_intercomm_recv_cmd(void *socket, httpush_msg_t *cmd, long timeout)
-{
+bool hp_intercomm_recv_cmd(void *socket, httpush_msg_t *cmd, long timeout) {
     int rc;
     zmq_pollitem_t items[1];
 
     *cmd = 0;
 
     items[0].socket = socket;
+    items[0].fd = 0;
     items[0].events = ZMQ_POLLIN;
+    items[0].revents = 0;
 
     rc = zmq_poll(items, 1, timeout);
 
@@ -114,34 +128,32 @@ bool hp_intercomm_recv_cmd(void *socket, httpush_msg_t *cmd, long timeout)
         zmq_msg_t msg;
 
         rc = zmq_msg_init(&msg);
-    	if (rc != 0) {
-    		return false;
-    	}
+        if (rc != 0) {
+            return false;
+        }
         rc = zmq_recv(socket, &msg, ZMQ_NOBLOCK);
 
         if (rc != 0) {
-    		zmq_msg_close(&msg);
-    		return false;
-    	}
-
-    	if (zmq_msg_size(&msg) == sizeof(httpush_msg_t)) {
-    	    memcpy(cmd, zmq_msg_data(&msg), sizeof(httpush_msg_t));
+            zmq_msg_close(&msg);
+            return false;
         }
 
-    	zmq_msg_close(&msg);
+        if (zmq_msg_size(&msg) == sizeof (httpush_msg_t)) {
+            memcpy(cmd, zmq_msg_data(&msg), sizeof (httpush_msg_t));
+        }
+
+        zmq_msg_close(&msg);
     }
-	return cmd;
+    return cmd;
 }
 
-
-bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout)
-{
+bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout) {
     httpush_msg_t received;
 
     if (hp_intercomm_recv_cmd(socket, &received, timeout) == false) {
         return false;
     }
-	return (received == expected_msg);
+    return (received == expected_msg);
 }
 
 /** 
@@ -149,19 +161,76 @@ bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout)
  * master process
  *
  */
-bool hp_intercomm_send(void *socket, httpush_msg_t inproc_msg)
-{
-	return hp_sendmsg(socket, (const void *) &inproc_msg,
-	                    sizeof(httpush_msg_t), ZMQ_NOBLOCK);
+bool hp_intercomm_send(void *socket, httpush_msg_t inproc_msg) {
+    return hp_sendmsg(socket, (const void *) &inproc_msg,
+            sizeof (httpush_msg_t), ZMQ_NOBLOCK);
 }
 
-bool hp_create_pair(void *context, struct hp_pair_t *pair, int pair_id)
-{
+bool hp_monitor_recv_cmd(void *socket, char identity[255], size_t *identity_len, httpush_msg_t *cmd) {
+    int64_t more;
+    size_t moresz;
+
+    int rc;
+    char *tmp;
+
+    char *message;
+    size_t message_len = 0;
+
+    *cmd = 0;
+
+    if (hp_recvmsg(socket, (void **) &tmp, identity_len, 0) == false) {
+        return false;
+    }
+
+    /* Copy the identity */
+    memcpy(identity, tmp, *identity_len);
+    free(tmp);
+
+    moresz = sizeof (int64_t);
+    rc = zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &moresz);
+    assert(rc == 0);
+
+    if (!more) {
+        return false;
+    }
+
+    if (hp_recvmsg(socket, (void **) &message, &message_len, 0) == false) {
+        return false;
+    }
+    assert(message == NULL);
+
+    moresz = sizeof (int64_t);
+    rc = zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &moresz);
+    assert(rc == 0);
+
+    if (!more) {
+        return false;
+    }
+
+    while (more) {
+        if (hp_recvmsg(socket, (void **) &message, &message_len, 0) == false) {
+            return false;
+        }
+
+        if (message_len >= 5 && !memcmp(message, "stats", message_len)) {
+            *cmd = MONITOR_STATS;
+        }
+
+        free(message);
+
+        moresz = sizeof (int64_t);
+        rc = zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &moresz);
+        assert(rc == 0);
+    }
+    return true;
+}
+
+bool hp_create_pair(void *context, struct hp_pair_t *pair, int pair_id) {
     int rc;
     char pair_uri[48];
 
     pair->front = NULL;
-    pair->back  = NULL;
+    pair->back = NULL;
 
     /* Create uri for the pair socket */
     (void) snprintf(pair_uri, 48, "inproc://httpush/pair-%d", pair_id);
@@ -198,155 +267,23 @@ return_error:
     return false;
 }
 
-struct hp_uri_t *hp_parse_uri(const char *uri, int64_t default_hwm, uint64_t default_swap)
-{
-    char *pch, *ptr, *last = NULL;
-    struct hp_uri_t *retval;
+bool hp_close_pair(struct hp_pair_t *pair) {
+    bool retval = true;
+    int rc;
 
-    struct evkeyval *item;
-    struct evkeyvalq *q;
-
-    struct evkeyvalq params;
-    evhttp_parse_query(uri, &params);
-
-    retval         = malloc(sizeof(*retval));
-    retval->swap   = default_swap;
-    retval->hwm    = default_hwm;
-    retval->linger = 2000;
-
-    ptr = strdup(uri);
-    if (!ptr)
-        return NULL;
-
-    pch = strtok_r(ptr, "?", &last);
-    if (!pch) {
-        free(ptr);
-        return NULL;
+    rc = zmq_close(pair->back);
+    if (rc == 0) {
+        pair->back = NULL;
+    } else {
+        retval = false;
     }
 
-    retval->uri = strdup(pch);
-    q = &params;
-
-    TAILQ_FOREACH(item, q, next) {
-        if (!strcmp(item->key, "swap")) {
-            bool success;
-            retval->swap = (int64_t) hp_unit_to_bytes(item->value, &success);
-
-            if (!success)
-                return NULL;
-
-        } else if (!strcmp(item->key, "hwm")) {
-            retval->hwm = (uint64_t) atoi(item->value);
-        } else if (!strcmp(item->key, "linger")) {
-            retval->linger = atoi(item->value);
-        }
+    rc = zmq_close(pair->front);
+    if (rc == 0) {
+        pair->front = NULL;
+    } else {
+        retval = false;
     }
-    free(ptr);
-    evhttp_clear_headers(&params);
+
     return retval;
-}
-
-int64_t hp_unit_to_bytes(const char *expression, bool *success)
-{
-    int64_t ret;
-
-    char *end = NULL;
-    long converted, factor = 1;
-
-    *success = false;
-
-    converted = strtol(expression, &end, 0);
-
-    /* Failed */
-    if (ERANGE == errno || end == expression) {
-        return 0;
-    }
-
-    if (*end) {
-        if (*end == 'G' || *end == 'g') {
-            factor = 1024 * 1024 * 1024;
-        } else if (*end == 'M' || *end == 'm') {
-            factor = 1024 * 1024;
-        } else if (*end == 'K' || *end == 'k') {
-            factor = 1024;
-        } else if (*end == 'B' || *end == 'b') { 
-            /* Noop */
-        } else {
-            HP_LOG_ERROR("Unknown swap size unit '%s'", end);
-            return 0;
-        }
-    }
-    *success = true;
-    ret = (int64_t) converted * factor;
-    return ret;
-}
-
-size_t hp_count_chr(const char *haystack, char needle)
-{
-	size_t occurances = 0;
-
-	while (*haystack != '\0') {
-		if (*(haystack++) == needle) {
-			occurances++;
-		}
-	}
-	return occurances;
-}
-
-int hp_create_listen_socket(const char *ip, const char *port)
-{
-    struct addrinfo *res, hints;
-    int rc, sockfd, reuse = 1;
-
-    memset(&hints, 0, sizeof(hints));
-
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    if (!ip)
-        hints.ai_flags = AI_PASSIVE;
-
-    rc = getaddrinfo(ip, port, &hints, &res);
-    if (rc != 0) {
-        HP_LOG_ERROR("getaddrinfo failed: %s", gai_strerror(rc));
-        return -1;
-    }
-
-    sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sockfd < 0) {
-        HP_LOG_ERROR("failed to create socket: %s", strerror(errno));
-        freeaddrinfo(res);
-        return -1;
-    }
-
-    rc = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int));
-    if (rc != 0) {
-        HP_LOG_ERROR("failed to set SO_REUSEADDR: %s", strerror(errno));
-        freeaddrinfo(res);
-        return -1;
-    }
-
-    rc = bind(sockfd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-
-    if (rc != 0) {
-        (void) close(sockfd);
-        HP_LOG_ERROR("bind failed: %s", strerror(errno));
-        return -1;
-    }
-
-    rc = evutil_make_socket_nonblocking(sockfd);
-    if (rc != 0) {
-        (void) close(sockfd);
-        HP_LOG_ERROR("fcntl failed: %s", strerror(errno));
-        return -1;
-    }
-
-    rc = listen(sockfd, 1024);
-    if (rc == -1) {
-        (void) close(sockfd);
-        HP_LOG_ERROR("listen failed: %s", strerror(errno));
-        return -1;
-    }
-    return sockfd;
 }

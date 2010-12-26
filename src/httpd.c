@@ -26,12 +26,11 @@
 |  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS    |
 |  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.                     |
 +-----------------------------------------------------------------------------------+
-*/
+ */
 
 #include "httpush.h"
 
-static void print_headers_to_buffer(struct evhttp_request *req, struct evbuffer *evb)
-{
+static void print_headers_to_buffer(struct evhttp_request *req, struct evbuffer *evb) {
     const char *method = NULL;
 
     struct evkeyval *header;
@@ -40,15 +39,15 @@ static void print_headers_to_buffer(struct evhttp_request *req, struct evbuffer 
     switch (req->type) {
         case EVHTTP_REQ_GET:
             method = "GET";
-        break;
+            break;
 
         case EVHTTP_REQ_POST:
             method = "POST";
-        break;
+            break;
 
         case EVHTTP_REQ_HEAD:
             method = "HEAD";
-        break;
+            break;
     }
 
     evbuffer_add_printf(evb, "%s %s HTTP/1.1\r\n", method, evhttp_request_uri(req));
@@ -62,154 +61,110 @@ static void print_headers_to_buffer(struct evhttp_request *req, struct evbuffer 
     evbuffer_add_printf(evb, "X-Remote-Peer: %s:%d\r\n", req->remote_host, req->remote_port);
 }
 
-#if 0
-void hp_httpd_publish_stats(struct evhttp_request *req, void *args)
-{
-    struct hp_httpd_thread_t *thread = (struct hp_httpd_thread_t *) args;
-	struct evbuffer *evb;
-
-	evb = evbuffer_new();
-
-	++(thread->counters.requests);
-
-	if (!evb) {
-		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
-		++(thread->counters.code_503);
-	}
-
-	++(thread->counters.code_200);
-
-	evhttp_add_header(req->output_headers, "Content-Type", "text/xml");
-
-	evbuffer_add_printf(evb, "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n");
-	evbuffer_add_printf(evb, "<httpush>\n");
-#ifdef PACKAGE_VERSION	
-	evbuffer_add_printf(evb, "  <version>%s</version>\n", PACKAGE_VERSION);
-#endif	
-	evbuffer_add_printf(evb, "  <statistics>\n");
-	evbuffer_add_printf(evb, "    <requests>%" PRIu64 "</requests>\n", httpd_requests);
-	evbuffer_add_printf(evb, "    <status code=\"200\">%" PRIu64 "</status>\n", httpd_code_200);
-	evbuffer_add_printf(evb, "    <status code=\"404\">%" PRIu64 "</status>\n", httpd_code_404);
-	evbuffer_add_printf(evb, "    <status code=\"412\">%" PRIu64 "</status>\n", httpd_code_412);
-	evbuffer_add_printf(evb, "    <status code=\"503\">%" PRIu64 "</status>\n", httpd_code_503);
-	evbuffer_add_printf(evb, "  </statistics>\n");
-	evbuffer_add_printf(evb, "</httpush>\n");
-
-	evhttp_send_reply(req, HTTP_OK, "OK", evb);
-	evbuffer_free(evb);
-}
-#endif
-
-void hp_httpd_reflect_request(struct evhttp_request *req, void *args)
-{
+void hp_httpd_reflect_request(struct evhttp_request *req, void *args) {
     struct hp_httpd_thread_t *thread = (struct hp_httpd_thread_t *) args;
     struct evbuffer *evb = evbuffer_new();
 
-	++(thread->counters.requests);
+    ++(thread->counters.requests);
 
-	if (!evb) {
-		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
-		++(thread->counters.code_503);
-	}
+    if (!evb) {
+        evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
+        ++(thread->counters.code_503);
+    }
 
-	++(thread->counters.code_200);
+    ++(thread->counters.code_200);
 
     evhttp_add_header(req->output_headers, "Content-Type", "text/plain");
 
     evbuffer_add_printf(evb, "--------------------------------------------------------------------\n");
 
-        print_headers_to_buffer(req, evb);
+    print_headers_to_buffer(req, evb);
 
     evbuffer_add_printf(evb, "\n--------------------------------------------------------------------\n");
 
-        evbuffer_add(evb, EVBUFFER_DATA(req->input_buffer), EVBUFFER_LENGTH(req->input_buffer));
+    evbuffer_add(evb, EVBUFFER_DATA(req->input_buffer), EVBUFFER_LENGTH(req->input_buffer));
 
     evbuffer_add_printf(evb, "\n--------------------------------------------------------------------\n");
 
     evhttp_send_reply(req, HTTP_OK, "OK", evb);
-	evbuffer_free(evb);
+    evbuffer_free(evb);
 }
 
-void hp_httpd_publish_message(struct evhttp_request *req, void *args)
-{
+void hp_httpd_publish_message(struct evhttp_request *req, void *args) {
     struct hp_httpd_thread_t *thread = (struct hp_httpd_thread_t *) args;
-	bool sent;
+    bool sent;
 
     ++(thread->counters.requests);
 
-    HP_LOG_DEBUG("thread %d handling request", thread->thread_id);
+    if (EVBUFFER_LENGTH(req->input_buffer) < 1) {
+        evhttp_send_error(req, 412, "Precondition Failed");
+        ++(thread->counters.code_412);
+        return;
+    }
 
-	if (EVBUFFER_LENGTH(req->input_buffer) < 1) {
-		evhttp_send_error(req, 412, "Precondition Failed");
-		++(thread->counters.code_412);
-		return;
-	}
-
-	if (thread->include_headers == true) {
-    	/* Send the first part of the message, headers */
+    if (thread->include_headers == true) {
+        /* Send the first part of the message, headers */
         struct evbuffer *header_evb = evbuffer_new();
         if (!header_evb) {
-    		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
-    		++(thread->counters.code_503);
+            evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
+            ++(thread->counters.code_503);
             return;
         }
 
         print_headers_to_buffer(req, header_evb);
-    	sent = hp_sendmsg(thread->out_socket, (const void *) EVBUFFER_DATA(header_evb), EVBUFFER_LENGTH(header_evb), ZMQ_SNDMORE|ZMQ_NOBLOCK);
+        sent = hp_sendmsg(thread->out_socket, (const void *) EVBUFFER_DATA(header_evb), EVBUFFER_LENGTH(header_evb), ZMQ_SNDMORE | ZMQ_NOBLOCK);
         evbuffer_free(header_evb);
 
         if (!sent) {
             HP_LOG_ERROR("Failed to send message: %s\n", zmq_strerror(errno));
-    		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
-    		++(thread->counters.code_503);
+            evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
+            ++(thread->counters.code_503);
             return;
         }
     }
 
     /* This should never block. Fingers crossed */
-	sent = hp_sendmsg(thread->out_socket, (const void *) EVBUFFER_DATA(req->input_buffer), EVBUFFER_LENGTH(req->input_buffer), ZMQ_NOBLOCK);
+    sent = hp_sendmsg(thread->out_socket, (const void *) EVBUFFER_DATA(req->input_buffer), EVBUFFER_LENGTH(req->input_buffer), ZMQ_NOBLOCK);
 
-	if (!sent) {
-		HP_LOG_ERROR("Failed to send message: %s\n", zmq_strerror(errno));
-		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
-		++(thread->counters.code_503);
-	} else {
-		struct evbuffer *evb;
+    if (!sent) {
+        HP_LOG_ERROR("Failed to send message: %s\n", zmq_strerror(errno));
+        evhttp_send_error(req, HTTP_SERVUNAVAIL, "Internal Server Error");
+        ++(thread->counters.code_503);
+    } else {
+        struct evbuffer *evb;
 
-		evb = evbuffer_new();
+        evb = evbuffer_new();
 
-		if (!evb) {
-    		evhttp_send_error(req, HTTP_OK, "OK");
-    		++(thread->counters.code_200);
+        if (!evb) {
+            evhttp_send_error(req, HTTP_OK, "OK");
+            ++(thread->counters.code_200);
             return;
         }
 
-		evbuffer_add(evb, "Sent", sizeof("Sent") - 1);
-		evhttp_send_reply(req, HTTP_OK, "OK", evb);
-		evbuffer_free(evb);
+        evbuffer_add(evb, "Sent", sizeof ("Sent") - 1);
+        evhttp_send_reply(req, HTTP_OK, "OK", evb);
+        evbuffer_free(evb);
 
-		++(thread->counters.code_200);
-	}
+        ++(thread->counters.code_200);
+    }
 }
 
-static void shutdown_httpd(struct event_base *base)
-{
-    struct timeval tv = { 0, 2 };
+static void shutdown_httpd(struct event_base *base) {
+    struct timeval tv = {0, 2};
 
     HP_LOG_DEBUG("Terminating event loop");
     event_base_loopexit(base, &tv);
     return;
 }
 
-void hp_httpd_intercomm_cb(int fd, short event, void *args)
-{
-    struct hp_httpd_thread_t *thread = (struct hp_httpd_thread_t *)args;
+void hp_httpd_intercomm_cb(int fd, short event, void *args) {
+    struct hp_httpd_thread_t *thread = (struct hp_httpd_thread_t *) args;
 
     while (true) {
         int rc;
         uint32_t events;
         httpush_msg_t cmd;
-        size_t siz = sizeof(uint32_t);
+        size_t siz = sizeof (uint32_t);
 
         rc = zmq_getsockopt(thread->intercomm.back, ZMQ_EVENTS, &events, &siz);
         if (rc != 0) {
@@ -227,28 +182,28 @@ void hp_httpd_intercomm_cb(int fd, short event, void *args)
                 case HTTPD_SHUTDOWN:
                     shutdown_httpd(thread->base);
                     return;
-                break;
+                    break;
 
                 case HTTPD_STATS:
-                    {
-                        struct hp_httpd_counters_t counters;
+                {
+                    struct hp_httpd_counters_t counters = {0,0,0,0,0};
+                    HP_LOG_DEBUG("httpd thread %d sending back stats", thread->thread_id);
 
-                        HP_LOG_DEBUG("httpd thread %d sending back stats", thread->thread_id);
+                    /* Take a copy of the values */
+                    counters.code_200 = thread->counters.code_200;
+                    counters.code_404 = thread->counters.code_404;
+                    counters.code_412 = thread->counters.code_412;
+                    counters.code_503 = thread->counters.code_503;
+                    counters.requests = thread->counters.requests;
 
-                        /* Take a copy of the values */
-                        counters.code_200 = thread->counters.code_200;
-                        counters.code_404 = thread->counters.code_404;
-                        counters.code_412 = thread->counters.code_412;
-                        counters.code_503 = thread->counters.code_503;
-                        counters.requests = thread->counters.requests;
+                    if (hp_sendmsg(thread->intercomm.back, (void *) &counters, sizeof (struct hp_httpd_counters_t), ZMQ_NOBLOCK) == false)
+                        HP_LOG_WARN("thread id %d failed to send back stats", thread->thread_id);
 
-                        rc = hp_sendmsg(thread->intercomm.back, (void *) &counters, sizeof(struct hp_httpd_counters_t), ZMQ_NOBLOCK);
-                        assert(rc == true);
-                    }
-                break;
+                }
+                    break;
 
                 default:
-                break;
+                    break;
             }
         }
     }
