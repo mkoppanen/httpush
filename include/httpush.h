@@ -157,6 +157,8 @@ bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout);
 bool hp_intercomm_recv_cmd(void *socket, httpush_msg_t *cmd, long timeout);
 bool hp_monitor_recv_cmd(void *socket, char identity[255], size_t *identity_len, httpush_msg_t *cmd);
 
+bool hp_sendmsg_ident(void *socket, char identity[255], size_t identity_size, const void *message, size_t message_size);
+
 bool hp_create_pair(void *context, struct hp_pair_t *pair, int pair_id);
 bool hp_close_pair(struct hp_pair_t *pair);
 

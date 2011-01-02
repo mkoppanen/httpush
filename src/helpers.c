@@ -287,3 +287,20 @@ bool hp_close_pair(struct hp_pair_t *pair) {
 
     return retval;
 }
+
+bool hp_sendmsg_ident(void *socket, char identity[255], size_t identity_size, const void *message, size_t message_size)
+{
+    if (hp_sendmsg(socket, identity, identity_size, ZMQ_NOBLOCK|ZMQ_SNDMORE) == false) {
+        return false;
+    }
+
+    if (hp_sendmsg(socket, (const void *) NULL, 0, ZMQ_NOBLOCK|ZMQ_SNDMORE) == false) {
+        return false;
+    }
+
+    if (hp_sendmsg(socket, (const void *) message, message_size, ZMQ_NOBLOCK) == false) {
+        return false;
+    }
+
+    return true;
+}

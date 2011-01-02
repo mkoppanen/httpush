@@ -186,13 +186,7 @@ static bool hp_handle_monitoring_command(void *monitor_socket, zmq_pollitem_t *t
         evbuffer_add_printf(evb, "  </statistics>\n");
         evbuffer_add_printf(evb, "</httpush>\n");
 
-        if (hp_sendmsg(monitor_socket, (const void *) identity, identity_size, ZMQ_NOBLOCK | ZMQ_SNDMORE) == true) {
-            if (hp_sendmsg(monitor_socket, (const void *) NULL, 0, ZMQ_NOBLOCK | ZMQ_SNDMORE) == true) {
-                if (hp_sendmsg(monitor_socket, (const void *) EVBUFFER_DATA(evb), EVBUFFER_LENGTH(evb), ZMQ_NOBLOCK) == true) {
-                    retval = true;
-                }
-            }
-        }
+        retval = hp_sendmsg_ident(monitor_socket, identity, identity_size, EVBUFFER_DATA(evb), EVBUFFER_LENGTH(evb));
         evbuffer_free(evb);
     }
     return retval;
@@ -323,7 +317,7 @@ static int hp_init_threads(struct httpush_args_t *args, struct hp_httpd_thread_t
     /* Run a loop an initialize sockets */
     for (i = 0; i < num_threads; i++) {
 
-        // init
+        /* init */
         memset(&(threads[i]), 0, sizeof (struct hp_httpd_thread_t));
 
         threads[i].thread_id = i;
@@ -350,7 +344,7 @@ static int hp_init_threads(struct httpush_args_t *args, struct hp_httpd_thread_t
             break;
         }
 
-        // Start the thread
+        /* Start the thread */
         if (pthread_create(&(threads[i].thread), NULL, hp_httpd_thread_start, threads[i].base)) {
             HP_LOG_ERROR("Failed to create launch thread id %d", i);
             (void) zmq_close(threads[i].out_socket);
@@ -382,6 +376,6 @@ int hp_server_boostrap(struct httpush_args_t *args, int num_threads) {
     monitor_socket = hp_create_socket(args->ctx, args->m_uris, args->num_m_uris, ZMQ_XREP);
     assert(monitor_socket);
 
-    // Got threads running, poll to see if they exit
+    /* Got threads running, poll to see if they exit */
     return hp_run_parent_loop(monitor_socket, threads, num_threads);
 }
