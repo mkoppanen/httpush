@@ -375,7 +375,7 @@ int main(int argc, char **argv) {
     /* -- end default values --- */
 
     int c, rc;
-    struct httpush_args_t args = {0};
+    struct httpush_args_t args;
 
     args.ctx = NULL;
     args.fd = -1;

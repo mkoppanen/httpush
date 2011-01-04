@@ -26,7 +26,7 @@
 |  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS    |
 |  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.                     |
 +-----------------------------------------------------------------------------------+
- */
+*/
 
 #include "httpush.h"
 
@@ -41,7 +41,7 @@ static void *hp_httpd_thread_start(void *base) {
 static bool hp_init_intercomm_event(struct hp_httpd_thread_t *thread) {
     int rc, fd = -1;
     size_t fd_size = sizeof (int);
-    struct timeval tv = {0};
+    struct timeval tv = {0, 0};
 
     rc = zmq_getsockopt(thread->intercomm.back, ZMQ_FD, &fd, &fd_size);
     if (rc != 0) {
@@ -57,11 +57,7 @@ static bool hp_init_intercomm_event(struct hp_httpd_thread_t *thread) {
     return true;
 }
 
-/*
- if type is ZMQ_PUSH then the socket will connect
- on all other socket types bind
- */
-static void *hp_create_socket(void *context, struct hp_uri_t **uris, size_t num_uris, int type) {
+static void *hp_create_socket(void *context, struct hp_uri_t **uris, size_t num_uris, int type, int mode) {
     void *socket;
     int rc;
     size_t i;
@@ -95,7 +91,7 @@ static void *hp_create_socket(void *context, struct hp_uri_t **uris, size_t num_
                 uris[i]->uri, uris[i]->swap, uris[i]->hwm, uris[i]->linger);
 
         /* Connect push sockets and bind all other sockets */
-        if (type == ZMQ_PUSH) {
+        if (mode == HP_CONNECT) {
             rc = zmq_connect(socket, uris[i]->uri);
         } else {
             rc = zmq_bind(socket, uris[i]->uri);
@@ -109,29 +105,53 @@ static void *hp_create_socket(void *context, struct hp_uri_t **uris, size_t num_
     return socket;
 }
 
+#if 0
+void memdmp(void *blob, size_t blob_size)
+{
+	size_t i;
+	char *ptr;
+
+	ptr = blob;
+
+	fprintf(stderr, "dumping blob size: %d\n", (int) blob_size);
+
+	for (i = 0; i < blob_size; i++) {
+		fputc(ptr[i], stderr);
+	}
+}
+#endif
+
 static bool hp_handle_monitoring_command(void *monitor_socket, zmq_pollitem_t *t_items, int num_threads) {
     int rc, i;
-    httpush_msg_t cmd;
     bool retval = false;
 
-    char identity[255];
-    size_t identity_size = 255;
+    char identity[HP_IDENTITY_MAX];
+    size_t identity_size = HP_IDENTITY_MAX;
+
+	char message[8];
+	size_t message_size = 8;
 
     HP_LOG_DEBUG("Message in monitoring socket");
 
-    if (hp_monitor_recv_cmd(monitor_socket, identity, &identity_size, &cmd) == true && cmd == MONITOR_STATS) {
+    if (hp_recvmsg_ident(monitor_socket, identity, &identity_size, message, &message_size) == true) {
 
         struct evbuffer *evb;
 
         int retries = 0, received = 0;
-        struct hp_httpd_counters_t sum = {0};
+        struct hp_httpd_counters_t sum;
+
+		if (message_size < 5 || memcmp(message, "stats", 5)) {
+			return false;
+		}
 
         /* Send message to threads saying that they should return stats */
         for (i = 0; i < num_threads; i++) {
-            if (hp_intercomm_send(t_items[i].socket, HTTPD_STATS) == false) {
+            if (hp_send_command(t_items[i].socket, HTTPD_STATS) == false) {
                 HP_LOG_WARN("Failed to request statistics from thread %d", i);
             }
         }
+
+		memset(&sum, 0, sizeof(struct hp_httpd_counters_t));
 
         while ((received < num_threads) && (retries < 5)) {
 
@@ -163,28 +183,16 @@ static bool hp_handle_monitoring_command(void *monitor_socket, zmq_pollitem_t *t
                             sum.requests += thread_counter->requests;
                             ++received;
                         }
-                        free(thread_counter);
+						if (thread_counter)
+                        	free(thread_counter);
                     }
                 }
             }
             HP_LOG_DEBUG("received %d expecting %d", received, num_threads);
         }
 
-        evb = evbuffer_new();
+		evb = hp_counters_to_xml(&sum, received, num_threads);
         assert(evb);
-
-        evbuffer_add_printf(evb, "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n");
-        evbuffer_add_printf(evb, "<httpush>\n");
-        evbuffer_add_printf(evb, "  <statistics>\n");
-        evbuffer_add_printf(evb, "    <threads>%d</threads>\n", num_threads);
-        evbuffer_add_printf(evb, "    <responses>%d</responses>\n", received);
-        evbuffer_add_printf(evb, "    <requests>%" PRIu64 "</requests>\n", sum.requests);
-        evbuffer_add_printf(evb, "    <status code=\"200\">%" PRIu64 "</status>\n", sum.code_200);
-        evbuffer_add_printf(evb, "    <status code=\"404\">%" PRIu64 "</status>\n", sum.code_404);
-        evbuffer_add_printf(evb, "    <status code=\"412\">%" PRIu64 "</status>\n", sum.code_412);
-        evbuffer_add_printf(evb, "    <status code=\"503\">%" PRIu64 "</status>\n", sum.code_503);
-        evbuffer_add_printf(evb, "  </statistics>\n");
-        evbuffer_add_printf(evb, "</httpush>\n");
 
         retval = hp_sendmsg_ident(monitor_socket, identity, identity_size, EVBUFFER_DATA(evb), EVBUFFER_LENGTH(evb));
         evbuffer_free(evb);
@@ -197,7 +205,7 @@ static bool hp_free_threads(struct hp_httpd_thread_t *threads, int num_threads) 
     bool success = true;
 
     for (i = 0; i < num_threads; i++) {
-        if (hp_intercomm_send(threads[i].intercomm.front, HTTPD_SHUTDOWN) == false) {
+        if (hp_send_command(threads[i].intercomm.front, HTTPD_SHUTDOWN) == false) {
             HP_LOG_ERROR("Failed to request thread id %d to terminate: %s", threads[i].thread_id, zmq_strerror(errno));
             success = false;
             continue;
@@ -324,7 +332,7 @@ static int hp_init_threads(struct httpush_args_t *args, struct hp_httpd_thread_t
         threads[i].include_headers = args->include_headers;
 
         /* init outgoing socket */
-        threads[i].out_socket = hp_create_socket(args->ctx, args->uris, args->num_uris, ZMQ_PUSH);
+        threads[i].out_socket = hp_create_socket(args->ctx, args->uris, args->num_uris, ZMQ_PUSH, HP_CONNECT);
         if (!threads[i].out_socket) {
             HP_LOG_ERROR("Failed to create out_socket for thread id %d", i);
             break;
@@ -364,17 +372,23 @@ int hp_server_boostrap(struct httpush_args_t *args, int num_threads) {
     void *monitor_socket;
 
     rc = hp_init_threads(args, threads, num_threads);
-    if (rc != num_threads) {
-        HP_LOG_ERROR("Freeing threads");
-
-        hp_free_threads(threads, rc);
-
+    if (rc < num_threads) {
+		HP_LOG_ERROR("Failed to initialize threads");
+        if (hp_free_threads(threads, rc) == false) {
+			HP_LOG_ERROR("Failed to terminate threads");
+		}
         return 1;
     }
 
     /* Monitoring the threads */
-    monitor_socket = hp_create_socket(args->ctx, args->m_uris, args->num_m_uris, ZMQ_XREP);
-    assert(monitor_socket);
+    monitor_socket = hp_create_socket(args->ctx, args->m_uris, args->num_m_uris, ZMQ_XREP, HP_BIND);
+    if (!monitor_socket) {
+		HP_LOG_ERROR("Failed to create monitor socket");
+	    if (hp_free_threads(threads, num_threads) == false) {
+			HP_LOG_ERROR("Failed to terminate threads");
+		}
+		return 1;
+	}
 
     /* Got threads running, poll to see if they exit */
     return hp_run_parent_loop(monitor_socket, threads, num_threads);

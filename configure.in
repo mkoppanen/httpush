@@ -6,6 +6,9 @@ AC_CONFIG_MACRO_DIR(config)
 AM_CONFIG_HEADER(include/config.h)
 AM_INIT_AUTOMAKE(tar-ustar dist-zip foreign)
 
+# Flags passed by user
+HP_ORIG_CFLAGS="${CFLAGS:-none}"
+
 # Checks for programs.
 AC_PROG_CC
 AC_PROG_CC_C99
@@ -21,6 +24,27 @@ AC_HEADER_TIME
 AC_TYPE_UINT32_T
 AC_TYPE_SIZE_T
 AC_TYPE_SSIZE_T
+
+# strcasecmp
+AC_CHECK_FUNCS_ONCE([strcasecmp])
+
+# maintainer mode
+AC_ARG_ENABLE([maintainer-mode], 
+              [AS_HELP_STRING([--enable-maintainer-mode], 
+                              [Enable maintainer mode])],
+              [hp_maintainer_mode="yes"])
+              
+# Maintainer mode flags for GCC
+if test "x$hp_maintainer_mode" = "xyes"; then
+    if test "x$GCC" = "xyes"; then
+        CFLAGS="-O0 -g"
+    fi
+    if test "x${HP_ORIG_CFLAGS}" != "xnone"; then
+        CFLAGS="${CFLAGS} ${HP_ORIG_CFLAGS}"
+    fi
+    CFLAGS="-DDEBUG ${CFLAGS}"
+fi
+              
 
 # pthreads
 AC_CHECK_LIB([pthread], 
@@ -119,8 +143,10 @@ if test "x$enable_rpath" != "xno"; then
     CFLAGS="-Wl,-rpath=${HP_LIBEVENT_PREFIX}/lib ${CFLAGS}"
 fi
 
-if test "x$GCC" = "xyes"; then
-    CFLAGS="-Wextra -Wall -Werror -pedantic ${CFLAGS}"
+if test "x$hp_maintainer_mode" = "xyes"; then
+    if test "x$GCC" = "xyes"; then
+        CFLAGS="-Wextra -Wall -Werror -pedantic ${CFLAGS}"
+    fi
 fi
 
 AC_LANG_POP([C])

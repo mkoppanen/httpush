@@ -107,7 +107,7 @@ bool hp_recvmsg(void *socket, void **message, size_t *message_len, int flags) {
     return true;
 }
 
-bool hp_intercomm_recv_cmd(void *socket, httpush_msg_t *cmd, long timeout) {
+bool hp_recv_command(void *socket, hp_command_t *cmd, long timeout) {
     int rc;
     zmq_pollitem_t items[1];
 
@@ -138,22 +138,12 @@ bool hp_intercomm_recv_cmd(void *socket, httpush_msg_t *cmd, long timeout) {
             return false;
         }
 
-        if (zmq_msg_size(&msg) == sizeof (httpush_msg_t)) {
-            memcpy(cmd, zmq_msg_data(&msg), sizeof (httpush_msg_t));
+        if (zmq_msg_size(&msg) == sizeof (hp_command_t)) {
+            memcpy(cmd, zmq_msg_data(&msg), sizeof (hp_command_t));
         }
-
         zmq_msg_close(&msg);
     }
-    return cmd;
-}
-
-bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout) {
-    httpush_msg_t received;
-
-    if (hp_intercomm_recv_cmd(socket, &received, timeout) == false) {
-        return false;
-    }
-    return (received == expected_msg);
+    return true;
 }
 
 /** 
@@ -161,68 +151,9 @@ bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout) {
  * master process
  *
  */
-bool hp_intercomm_send(void *socket, httpush_msg_t inproc_msg) {
+bool hp_send_command(void *socket, hp_command_t inproc_msg) {
     return hp_sendmsg(socket, (const void *) &inproc_msg,
-            sizeof (httpush_msg_t), ZMQ_NOBLOCK);
-}
-
-bool hp_monitor_recv_cmd(void *socket, char identity[255], size_t *identity_len, httpush_msg_t *cmd) {
-    int64_t more;
-    size_t moresz;
-
-    int rc;
-    char *tmp;
-
-    char *message;
-    size_t message_len = 0;
-
-    *cmd = 0;
-
-    if (hp_recvmsg(socket, (void **) &tmp, identity_len, 0) == false) {
-        return false;
-    }
-
-    /* Copy the identity */
-    memcpy(identity, tmp, *identity_len);
-    free(tmp);
-
-    moresz = sizeof (int64_t);
-    rc = zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &moresz);
-    assert(rc == 0);
-
-    if (!more) {
-        return false;
-    }
-
-    if (hp_recvmsg(socket, (void **) &message, &message_len, 0) == false) {
-        return false;
-    }
-    assert(message == NULL);
-
-    moresz = sizeof (int64_t);
-    rc = zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &moresz);
-    assert(rc == 0);
-
-    if (!more) {
-        return false;
-    }
-
-    while (more) {
-        if (hp_recvmsg(socket, (void **) &message, &message_len, 0) == false) {
-            return false;
-        }
-
-        if (message_len >= 5 && !memcmp(message, "stats", message_len)) {
-            *cmd = MONITOR_STATS;
-        }
-
-        free(message);
-
-        moresz = sizeof (int64_t);
-        rc = zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &moresz);
-        assert(rc == 0);
-    }
-    return true;
+            sizeof (hp_command_t), ZMQ_NOBLOCK);
 }
 
 bool hp_create_pair(void *context, struct hp_pair_t *pair, int pair_id) {
@@ -267,7 +198,8 @@ return_error:
     return false;
 }
 
-bool hp_close_pair(struct hp_pair_t *pair) {
+bool hp_close_pair(struct hp_pair_t *pair) 
+{
     bool retval = true;
     int rc;
 
@@ -288,8 +220,12 @@ bool hp_close_pair(struct hp_pair_t *pair) {
     return retval;
 }
 
-bool hp_sendmsg_ident(void *socket, char identity[255], size_t identity_size, const void *message, size_t message_size)
+bool hp_sendmsg_ident(void *socket, char identity[HP_IDENTITY_MAX], size_t identity_size, const void *message, size_t message_size)
 {
+	if (identity_size > HP_IDENTITY_MAX) {
+		return false;
+	}
+
     if (hp_sendmsg(socket, identity, identity_size, ZMQ_NOBLOCK|ZMQ_SNDMORE) == false) {
         return false;
     }
@@ -304,3 +240,93 @@ bool hp_sendmsg_ident(void *socket, char identity[255], size_t identity_size, co
 
     return true;
 }
+
+bool hp_recvmsg_ident(void *socket, char identity[HP_IDENTITY_MAX], size_t *identity_size, void *message, size_t *message_size)
+{
+    int64_t more;
+    size_t moresz, max_size;
+
+    int rc;
+    char *buffer;
+	size_t buffer_size;
+
+	if (*identity_size > HP_IDENTITY_MAX) {
+		return false;
+	}
+
+    if (hp_recvmsg(socket, (void **) &buffer, identity_size, 0) == false) {
+        return false;
+    }
+
+    /* Copy the identity */
+    memcpy(identity, buffer, *identity_size);
+    free(buffer);
+
+    moresz = sizeof (int64_t);
+    rc = zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &moresz);
+
+	if (rc != 0) {
+		return false;
+	}
+
+	/* No need to recv larger chunks than the buffer */
+	buffer_size   = *message_size;
+	max_size      = *message_size;
+	*message_size = 0;
+
+    while (more) {
+        if (hp_recvmsg(socket, (void **) &buffer, &buffer_size, 0) == false) {
+			*message_size = 0;
+			return false;
+        }
+
+		if (!buffer) {
+			continue;
+		}
+
+		if (*message_size + buffer_size > max_size) {
+			*message_size = 0;
+			free(buffer);
+			return false;
+		}
+
+		memcpy((char *) message + *message_size, buffer, buffer_size);
+		*message_size += buffer_size;
+
+		free(buffer);
+
+        moresz = sizeof (int64_t);
+        rc = zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &moresz);
+
+		if (rc != 0) {
+			*message_size = 0;
+			return false;
+		}
+    }
+    return true;
+}
+
+struct evbuffer *hp_counters_to_xml(struct hp_httpd_counters_t *counter, int responses, int threads)
+{
+	struct evbuffer *evb = evbuffer_new();
+
+	if (!evb)
+		return NULL;
+
+    evbuffer_add_printf(evb, "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n");
+    evbuffer_add_printf(evb, "<httpush>\n");
+    evbuffer_add_printf(evb, "  <statistics>\n");
+    evbuffer_add_printf(evb, "    <threads>%d</threads>\n", threads);
+    evbuffer_add_printf(evb, "    <responses>%d</responses>\n", responses);
+    evbuffer_add_printf(evb, "    <requests>%" PRIu64 "</requests>\n", counter->requests);
+    evbuffer_add_printf(evb, "    <status code=\"200\">%" PRIu64 "</status>\n", counter->code_200);
+    evbuffer_add_printf(evb, "    <status code=\"404\">%" PRIu64 "</status>\n", counter->code_404);
+    evbuffer_add_printf(evb, "    <status code=\"412\">%" PRIu64 "</status>\n", counter->code_412);
+    evbuffer_add_printf(evb, "    <status code=\"503\">%" PRIu64 "</status>\n", counter->code_503);
+    evbuffer_add_printf(evb, "  </statistics>\n");
+    evbuffer_add_printf(evb, "</httpush>\n");
+
+	return evb;
+}
+
+

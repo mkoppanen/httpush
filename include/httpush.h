@@ -26,13 +26,13 @@
 |  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS    |
 |  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.                     |
 +-----------------------------------------------------------------------------------+
- */
+*/
 
 #ifndef __HTTPUSH_H__
-#define __HTTPUSH_H__
+# define __HTTPUSH_H__
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+# include "config.h"
 #endif
 
 #include <ctype.h>
@@ -65,13 +65,25 @@
 #include <netdb.h>
 #include <fcntl.h>
 
+/* Logging macros */
+#include "log.h"
+
+/* Platform specific ones */
+#include "platform.h"
+
+#define HP_IDENTITY_MAX 255
+
 struct hp_uri_t {
+	/* the parsed 0mq uri */
     char *uri;
 
+	/* HWM value */
     uint64_t hwm;
 
+	/* Swap in bytes */
     int64_t swap;
 
+	/* Linger value */
     int linger;
 };
 
@@ -140,24 +152,42 @@ struct hp_httpd_thread_t {
 
 #define HP_SEC_TO_MSEC(sec_) (sec_ * 1000000)
 
-typedef enum _httpush_msg_t {
+typedef enum _hp_command_t {
     HTTPD_READY = 10,
     HTTPD_FAIL,
     HTTPD_SHUTDOWN,
     HTTPD_STATS,
     MONITOR_STATS
-} httpush_msg_t;
+} hp_command_t;
 
+enum {
+	HP_CONNECT,
+	HP_BIND
+};
+
+/*
+	General purpose functions for sending / receiving messages
+*/
 bool hp_sendmsg(void *socket, const void *message, size_t message_len, int flags);
 bool hp_recvmsg(void *socket, void **message, size_t *message_len, int flags);
 
-bool hp_intercomm_send(void *socket, httpush_msg_t inproc_msg);
-bool hp_intercomm_recv(void *socket, httpush_msg_t expected_msg, long timeout);
+/*
+	Sending and receiving commands
+*/
+bool hp_send_command(void *socket, hp_command_t cmd);
+bool hp_recv_command(void *socket, hp_command_t *cmd, long timeout);
 
-bool hp_intercomm_recv_cmd(void *socket, httpush_msg_t *cmd, long timeout);
-bool hp_monitor_recv_cmd(void *socket, char identity[255], size_t *identity_len, httpush_msg_t *cmd);
+/*
+	Send message using identity
+*/
+bool hp_sendmsg_ident(void *socket, char identity[HP_IDENTITY_MAX], size_t identity_size, const void *message, size_t message_size);
 
-bool hp_sendmsg_ident(void *socket, char identity[255], size_t identity_size, const void *message, size_t message_size);
+/*
+	message parameter is not allocated, a fixed size buffer of *message_size must be passed
+	the size of the resulting message is returned in *message_size
+*/
+bool hp_recvmsg_ident(void *socket, char identity[HP_IDENTITY_MAX], size_t *identity_size, void *message, size_t *message_size);
+
 
 bool hp_create_pair(void *context, struct hp_pair_t *pair, int pair_id);
 bool hp_close_pair(struct hp_pair_t *pair);
@@ -166,37 +196,10 @@ int hp_server_boostrap(struct httpush_args_t *args, int http_threads);
 
 void hp_httpd_intercomm_cb(int fd, short event, void *args);
 
+struct evbuffer *hp_counters_to_xml(struct hp_httpd_counters_t *counter, int responses, int threads);
+
+/* evhttp callbacks in httpd.c */
 void hp_httpd_publish_message(struct evhttp_request *req, void *args);
 void hp_httpd_reflect_request(struct evhttp_request *req, void *param);
-
-#ifdef DEBUG
-
-#define HP_DO_LOG(level_, ...) { \
-    time_t my_time; \
-    char buffer_[26], line_[256]; \
-    time(&my_time); \
-    ctime_r(&my_time, buffer_); \
-    (void) snprintf(line_, 256, __VA_ARGS__); \
-    fprintf(stderr, "[%24.24s] [%s:%d] [%s] %s\n", buffer_, __FILE__, __LINE__, level_, line_); \
-}
-
-#define HP_LOG_FATAL(...) HP_DO_LOG("FATAL", __VA_ARGS__);
-#define HP_LOG_ERROR(...) HP_DO_LOG("ERROR", __VA_ARGS__);
-#define HP_LOG_WARN(...)  HP_DO_LOG("WARN", __VA_ARGS__);
-#define HP_LOG_INFO(...)  HP_DO_LOG("INFO", __VA_ARGS__);
-#define HP_LOG_DEBUG(...) HP_DO_LOG("DEBUG", __VA_ARGS__);
-
-#else
-
-#define HP_DO_LOG(level_, ...) syslog(level_, __VA_ARGS__);
-#define HP_LOG_FATAL(...) HP_DO_LOG(LOG_EMERG, __VA_ARGS__);
-#define HP_LOG_ERROR(...) HP_DO_LOG(LOG_ERR, __VA_ARGS__);
-#define HP_LOG_WARN(...)  HP_DO_LOG(LOG_WARNING, __VA_ARGS__);
-#define HP_LOG_INFO(...)  HP_DO_LOG(LOG_INFO, __VA_ARGS__);
-#define HP_LOG_DEBUG(...)
-
-
-#endif
-
 
 #endif /* __HTTPUSH_H__ */
