@@ -32,7 +32,7 @@
 
 static void print_headers_to_buffer(struct evhttp_request *req, struct evbuffer *evb) {
     const char *method = NULL;
-	bool has_x_forwarded_for = false;
+    bool has_x_forwarded_for = false;
 
 
     struct evkeyval *header;
@@ -55,18 +55,18 @@ static void print_headers_to_buffer(struct evhttp_request *req, struct evbuffer 
     evbuffer_add_printf(evb, "%s %s HTTP/1.1\r\n", method, evhttp_request_uri(req));
 
     q = req->input_headers;
-	has_x_forwarded_for = (evhttp_find_header(req->input_headers, "X-Forwarded-For") != NULL);
+    has_x_forwarded_for = (evhttp_find_header(req->input_headers, "X-Forwarded-For") != NULL);
 
     TAILQ_FOREACH(header, q, next) {
-		if (has_x_forwarded_for && !strcasecmp(header->key, "X-Forwarded-For")) {
-			evbuffer_add_printf(evb, "X-Forwarded-For: %s, %s\r\n", header->value, req->remote_host);
-		} else {
-			evbuffer_add_printf(evb, "%s: %s\r\n", header->key, header->value);
-		}
+        if (has_x_forwarded_for && !strcasecmp(header->key, "X-Forwarded-For")) {
+            evbuffer_add_printf(evb, "X-Forwarded-For: %s, %s\r\n", header->value, req->remote_host);
+        } else {
+            evbuffer_add_printf(evb, "%s: %s\r\n", header->key, header->value);
+        }
     }
-	if (!has_x_forwarded_for) {
-		evbuffer_add_printf(evb, "X-Forwarded-For: %s\r\n", req->remote_host);
-	}
+    if (!has_x_forwarded_for) {
+        evbuffer_add_printf(evb, "X-Forwarded-For: %s\r\n", req->remote_host);
+    }
 }
 
 void hp_httpd_reflect_request(struct evhttp_request *req, void *args) {
@@ -105,7 +105,7 @@ void hp_httpd_publish_message(struct evhttp_request *req, void *args)
 
     ++(thread->counters.requests);
 
-	/* If headers are not to be included and we have no body, send back 412 */
+    /* If headers are not to be included and we have no body, send back 412 */
     if (thread->include_headers == false && EVBUFFER_LENGTH(req->input_buffer) < 1) {
         evhttp_send_error(req, 412, "Precondition Failed");
         ++(thread->counters.code_412);
@@ -201,8 +201,8 @@ void hp_httpd_intercomm_cb(int fd __unused, short event __unused, void *args)
                     struct hp_httpd_counters_t counters;
                     HP_LOG_DEBUG("httpd thread %d sending back stats", thread->thread_id);
 
-					/* Copy the counters */
-					memcpy(&counters, &thread->counters, sizeof(struct hp_httpd_counters_t));
+                    /* Copy the counters */
+                    memcpy(&counters, &thread->counters, sizeof(struct hp_httpd_counters_t));
 
                     if (hp_sendmsg(thread->intercomm.back, (void *) &counters, sizeof (struct hp_httpd_counters_t), ZMQ_NOBLOCK) == false)
                         HP_LOG_WARN("thread id %d failed to send back stats", thread->thread_id);
