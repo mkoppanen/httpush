@@ -71,8 +71,9 @@ Monitoring
 
 A monitoring socket can be used to query statistics about the server usage.
 Example response from monitoring socket might contain:
+
 <?xml version="1.0" encoding="UTF-8" ?>
- <httpush>
+<httpush>
    <statistics>
      <threads>10</threads>
      <responses>10</responses>
