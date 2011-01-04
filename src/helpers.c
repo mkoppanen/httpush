@@ -248,7 +248,7 @@ bool hp_recvmsg_ident(void *socket, char identity[HP_IDENTITY_MAX], size_t *iden
 
     int rc;
     char *buffer;
-	size_t buffer_size;
+    size_t buffer_size;
 
     if (*identity_size > HP_IDENTITY_MAX) {
         return false;
@@ -265,53 +265,53 @@ bool hp_recvmsg_ident(void *socket, char identity[HP_IDENTITY_MAX], size_t *iden
     moresz = sizeof (int64_t);
     rc = zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &moresz);
 
-	if (rc != 0) {
-		return false;
-	}
+    if (rc != 0) {
+        return false;
+    }
 
-	/* No need to recv larger chunks than the buffer */
-	buffer_size   = *message_size;
-	max_size      = *message_size;
-	*message_size = 0;
+    /* No need to recv larger chunks than the buffer */
+    buffer_size   = *message_size;
+    max_size      = *message_size;
+    *message_size = 0;
 
     while (more) {
         if (hp_recvmsg(socket, (void **) &buffer, &buffer_size, 0) == false) {
-			*message_size = 0;
-			return false;
+            *message_size = 0;
+            return false;
         }
 
-		if (!buffer) {
-			continue;
-		}
+        if (!buffer) {
+            continue;
+        }
 
-		if (*message_size + buffer_size > max_size) {
-			*message_size = 0;
-			free(buffer);
-			return false;
-		}
+        if (*message_size + buffer_size > max_size) {
+            *message_size = 0;
+            free(buffer);
+            return false;
+        }
 
-		memcpy((char *) message + *message_size, buffer, buffer_size);
-		*message_size += buffer_size;
+        memcpy((char *) message + *message_size, buffer, buffer_size);
+        *message_size += buffer_size;
 
-		free(buffer);
+        free(buffer);
 
         moresz = sizeof (int64_t);
         rc = zmq_getsockopt(socket, ZMQ_RCVMORE, &more, &moresz);
 
-		if (rc != 0) {
-			*message_size = 0;
-			return false;
-		}
+        if (rc != 0) {
+            *message_size = 0;
+            return false;
+        }
     }
     return true;
 }
 
 struct evbuffer *hp_counters_to_xml(struct hp_httpd_counters_t *counter, int responses, int threads)
 {
-	struct evbuffer *evb = evbuffer_new();
+    struct evbuffer *evb = evbuffer_new();
 
-	if (!evb)
-		return NULL;
+    if (!evb)
+        return NULL;
 
     evbuffer_add_printf(evb, "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n");
     evbuffer_add_printf(evb, "<httpush>\n");
@@ -326,7 +326,7 @@ struct evbuffer *hp_counters_to_xml(struct hp_httpd_counters_t *counter, int res
     evbuffer_add_printf(evb, "  </statistics>\n");
     evbuffer_add_printf(evb, "</httpush>\n");
 
-	return evb;
+    return evb;
 }
 
 
