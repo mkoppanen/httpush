@@ -222,9 +222,9 @@ bool hp_close_pair(struct hp_pair_t *pair)
 
 bool hp_sendmsg_ident(void *socket, char identity[HP_IDENTITY_MAX], size_t identity_size, const void *message, size_t message_size)
 {
-	if (identity_size > HP_IDENTITY_MAX) {
-		return false;
-	}
+    if (identity_size > HP_IDENTITY_MAX) {
+        return false;
+    }
 
     if (hp_sendmsg(socket, identity, identity_size, ZMQ_NOBLOCK|ZMQ_SNDMORE) == false) {
         return false;
@@ -250,9 +250,9 @@ bool hp_recvmsg_ident(void *socket, char identity[HP_IDENTITY_MAX], size_t *iden
     char *buffer;
 	size_t buffer_size;
 
-	if (*identity_size > HP_IDENTITY_MAX) {
-		return false;
-	}
+    if (*identity_size > HP_IDENTITY_MAX) {
+        return false;
+    }
 
     if (hp_recvmsg(socket, (void **) &buffer, identity_size, 0) == false) {
         return false;
