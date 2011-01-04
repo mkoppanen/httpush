@@ -47,7 +47,7 @@ Command-line options
 		<td> -u </td><td> string </td><td> nobody </td><td> User to run as </td>
 	</tr>                         
     <tr>                          
-		<td> -w </td><td> integer </td><td> 0 </td><td> The 0MQ high watermark limit (corresponds to ZMQ_HWM) </td>
+		<td> -w </td><td> integer </td><td> 0 </td><td> The ZeroMQ high watermark limit (ZMQ_HWM) </td>
 	</tr>                         
     <tr>                          
 		<td> -z </td><td> string </td><td> tcp://127.0.0.1:5567 </td><td> Comma-separated list of zeromq URIs to connect to </td>
@@ -71,8 +71,7 @@ Monitoring
 
 A monitoring socket can be used to query statistics about the server usage.
 Example response from monitoring socket might contain:
-
-<pre><code><?xml version="1.0" encoding="UTF-8" ?>
+<?xml version="1.0" encoding="UTF-8" ?>
  <httpush>
    <statistics>
      <threads>10</threads>
@@ -83,5 +82,5 @@ Example response from monitoring socket might contain:
      <status code="412">0</status>
      <status code="503">0</status>
    </statistics>
- </httpush></code></pre>
+</httpush>
 

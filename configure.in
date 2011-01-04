@@ -1,5 +1,5 @@
 AC_PREREQ(2.61)
-AC_INIT([httpush], [0.0.4], [mikko.koppanen@gmail.com])
+AC_INIT([httpush], [0.0.5], [mikko.koppanen@gmail.com])
 
 AC_CONFIG_AUX_DIR(config)
 AC_CONFIG_MACRO_DIR(config)
