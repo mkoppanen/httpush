@@ -153,7 +153,7 @@ static bool hp_handle_monitoring_command(void *monitor_socket, zmq_pollitem_t *t
             for (i = 0; i < num_threads; i++) {
 
                 if (t_items[i].revents & ZMQ_POLLIN) {
-                    struct hp_httpd_counters_t *thread_counter;
+                    struct hp_httpd_counters_t *thread_counter = NULL;
                     size_t msiz = sizeof (struct hp_httpd_counters_t);
 
                     if (hp_recvmsg(t_items[i].socket, (void **) &thread_counter, &msiz, 0) == true) {
@@ -221,7 +221,7 @@ static bool hp_free_threads(struct hp_httpd_thread_t *threads, int num_threads) 
 }
 
 static int hp_run_parent_loop(void *monitor_socket, struct hp_httpd_thread_t *threads, int num_threads) {
-    int i, rc;
+    int i, rc, retval = 0;
     zmq_pollitem_t m_items[1];
     zmq_pollitem_t t_items[num_threads];
 
@@ -256,13 +256,15 @@ static int hp_run_parent_loop(void *monitor_socket, struct hp_httpd_thread_t *th
 
     if (hp_free_threads(threads, num_threads) == false) {
         HP_LOG_ERROR("Thread termination failed. The process is likely to hang");
+        retval = 1;
     }
 
     rc = zmq_close(monitor_socket);
     if (rc != 0) {
         HP_LOG_ERROR("Failed to close monitor socket. The process is likely to hang");
+        retval = 1;
     }
-    return 0;
+    return retval;
 }
 
 static bool hp_thread_init_events(struct hp_httpd_thread_t *thread, int fd) {
