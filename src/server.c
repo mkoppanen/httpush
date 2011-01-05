@@ -108,28 +108,27 @@ static void *hp_create_socket(void *context, struct hp_uri_t **uris, size_t num_
 #if 0
 void memdmp(void *blob, size_t blob_size)
 {
-	size_t i;
-	char *ptr;
+    size_t i;
+    char *ptr;
 
-	ptr = blob;
+    ptr = blob;
 
-	fprintf(stderr, "dumping blob size: %d\n", (int) blob_size);
+    fprintf(stderr, "dumping blob size: %d\n", (int) blob_size);
 
-	for (i = 0; i < blob_size; i++) {
-		fputc(ptr[i], stderr);
-	}
+    for (i = 0; i < blob_size; i++) {
+        fputc(ptr[i], stderr);
+    }
 }
 #endif
 
 static bool hp_handle_monitoring_command(void *monitor_socket, zmq_pollitem_t *t_items, int num_threads) {
     int rc, i;
     bool retval = false;
-
     char identity[HP_IDENTITY_MAX];
     size_t identity_size = HP_IDENTITY_MAX;
 
-	char message[8];
-	size_t message_size = 8;
+    char message[8];
+    size_t message_size = 8;
 
     HP_LOG_DEBUG("Message in monitoring socket");
 
@@ -140,9 +139,9 @@ static bool hp_handle_monitoring_command(void *monitor_socket, zmq_pollitem_t *t
         int retries = 0, received = 0;
         struct hp_httpd_counters_t sum;
 
-		if (message_size < 5 || memcmp(message, "stats", 5)) {
-			return false;
-		}
+        if (message_size < 5 || memcmp(message, "stats", 5)) {
+            return false;
+        }
 
         /* Send message to threads saying that they should return stats */
         for (i = 0; i < num_threads; i++) {
@@ -151,7 +150,7 @@ static bool hp_handle_monitoring_command(void *monitor_socket, zmq_pollitem_t *t
             }
         }
 
-		memset(&sum, 0, sizeof(struct hp_httpd_counters_t));
+        memset(&sum, 0, sizeof(struct hp_httpd_counters_t));
 
         while ((received < num_threads) && (retries < 5)) {
 
@@ -183,16 +182,18 @@ static bool hp_handle_monitoring_command(void *monitor_socket, zmq_pollitem_t *t
                             sum.requests += thread_counter->requests;
                             ++received;
                         }
-						if (thread_counter)
-                        	free(thread_counter);
+                        if (thread_counter)
+                            free(thread_counter);
                     }
                 }
             }
             HP_LOG_DEBUG("received %d expecting %d", received, num_threads);
         }
 
-		evb = hp_counters_to_xml(&sum, received, num_threads);
-        assert(evb);
+        evb = hp_counters_to_xml(&sum, received, num_threads);
+        if (!evb) {
+            return false;
+        }
 
         retval = hp_sendmsg_ident(monitor_socket, identity, identity_size, EVBUFFER_DATA(evb), EVBUFFER_LENGTH(evb));
         evbuffer_free(evb);
@@ -274,8 +275,9 @@ static int hp_run_parent_loop(void *monitor_socket, struct hp_httpd_thread_t *th
     }
 
     rc = zmq_close(monitor_socket);
-    assert(rc == 0);
-
+    if (rc != 0) {
+        HP_LOG_ERROR("Failed to close monitor socket. The process is likely to hang");
+    }
     return 0;
 }
 
@@ -294,8 +296,9 @@ static bool hp_thread_init_events(struct hp_httpd_thread_t *thread, int fd) {
     }
 
     /* Specific action for displaying back data */
+#ifdef DEBUG
     evhttp_set_cb(thread->httpd, "/reflect", hp_httpd_reflect_request, thread);
-
+#endif
     /* Catch all */
     evhttp_set_gencb(thread->httpd, hp_httpd_publish_message, thread);
 
@@ -373,22 +376,22 @@ int hp_server_boostrap(struct httpush_args_t *args, int num_threads) {
 
     rc = hp_init_threads(args, threads, num_threads);
     if (rc < num_threads) {
-		HP_LOG_ERROR("Failed to initialize threads");
+        HP_LOG_ERROR("Failed to initialize threads");
         if (hp_free_threads(threads, rc) == false) {
-			HP_LOG_ERROR("Failed to terminate threads");
-		}
+            HP_LOG_ERROR("Failed to terminate threads");
+        }
         return 1;
     }
 
     /* Monitoring the threads */
     monitor_socket = hp_create_socket(args->ctx, args->m_uris, args->num_m_uris, ZMQ_XREP, HP_BIND);
     if (!monitor_socket) {
-		HP_LOG_ERROR("Failed to create monitor socket");
-	    if (hp_free_threads(threads, num_threads) == false) {
-			HP_LOG_ERROR("Failed to terminate threads");
-		}
-		return 1;
-	}
+        HP_LOG_ERROR("Failed to create monitor socket");
+        if (hp_free_threads(threads, num_threads) == false) {
+            HP_LOG_ERROR("Failed to terminate threads");
+        }
+        return 1;
+    }
 
     /* Got threads running, poll to see if they exit */
     return hp_run_parent_loop(monitor_socket, threads, num_threads);

@@ -68,6 +68,7 @@ static void print_headers_to_buffer(struct evhttp_request *req, struct evbuffer 
     }
 }
 
+#ifdef DEBUG
 void hp_httpd_reflect_request(struct evhttp_request *req, void *args) {
     struct hp_httpd_thread_t *thread = (struct hp_httpd_thread_t *) args;
     struct evbuffer *evb = evbuffer_new();
@@ -96,6 +97,7 @@ void hp_httpd_reflect_request(struct evhttp_request *req, void *args) {
     evhttp_send_reply(req, HTTP_OK, "OK", evb);
     evbuffer_free(evb);
 }
+#endif
 
 void hp_httpd_publish_message(struct evhttp_request *req, void *args) 
 {
@@ -171,6 +173,8 @@ void hp_httpd_intercomm_cb(int fd __unused, short event __unused, void *args)
 {
     struct hp_httpd_thread_t *thread = (struct hp_httpd_thread_t *) args;
 
+    HP_LOG_DEBUG("httpd thread %d received intercomm event", thread->thread_id);
+
     while (true) {
         int rc;
         uint32_t events;
@@ -179,14 +183,16 @@ void hp_httpd_intercomm_cb(int fd __unused, short event __unused, void *args)
 
         rc = zmq_getsockopt(thread->intercomm.back, ZMQ_EVENTS, &events, &siz);
         if (rc != 0) {
+            if (errno == ETERM) {
+                shutdown_httpd(thread->base);
+                return;
+            }
             break;
         }
 
         if (!(events & ZMQ_POLLIN)) {
             break;
         }
-
-        HP_LOG_DEBUG("httpd thread %d received intercomm event", thread->thread_id);
 
         if (hp_recv_command(thread->intercomm.back, &cmd, HP_SEC_TO_MSEC(1)) == true) {
             switch (cmd) {

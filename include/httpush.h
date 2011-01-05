@@ -200,6 +200,8 @@ struct evbuffer *hp_counters_to_xml(struct hp_httpd_counters_t *counter, int res
 
 /* evhttp callbacks in httpd.c */
 void hp_httpd_publish_message(struct evhttp_request *req, void *args);
+#ifdef DEBUG
 void hp_httpd_reflect_request(struct evhttp_request *req, void *param);
+#endif
 
 #endif /* __HTTPUSH_H__ */
