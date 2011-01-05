@@ -4,56 +4,99 @@ httpush
 What is httpush?
 ----------------
 
-httpush is a small http web-server that pushes the messages to ZeroMQ socket.
-The web-server part is implemented using libevent evhttpd and configurable
-amount of worker threads. Each one of the worker threads run a separate event
-loop and nothing is shared between the threads.
+httpush is a small web-server that pushes the messages to ZeroMQ socket.
+The web-server part is implemented using libevent evhttpd and with a 
+configurable amount of worker threads. Each one of the worker threads 
+runs a separate event loop and nothing is shared between the threads.
+
+The project was initially started to test some of the concepts mentioned 
+in http://www.zeromq.org/blog:multithreading-magic. Namely, each one of the
+httpd threads shares a messaging socket with the parent process which is used
+to signal different events, such as shutdown.
 
 Command-line options
 --------------------
 
 <table>
 	<tr>
-		<td> option </td><td> type </td><td> default </td><td> description </td>
+		<td> option </td>
+		<td> type </td>
+		<td> default </td>
+		<td> description </td>
 	</tr>
     <tr>
-		<td> -b </td><td> string </td><td> 0.0.0.0 </td><td> Hostname or ip to for the HTTP daemon </td>
+		<td> -b </td>
+		<td> string </td>
+		<td> 0.0.0.0 </td>
+		<td> Hostname or ip to for the HTTP daemon </td>
 	</tr>
     <tr>
-		<td> -d </td><td> flag </td><td> no </td><td> Daemonize the program </td>
+		<td> -d </td>
+		<td> flag </td>
+		<td> no </td>
+		<td> Daemonize the program </td>
 	</tr>    
     <tr>     
-		<td> -g </td><td> string </td><td> nobody </td><td> Group to run as </td>
+		<td> -g </td>
+		<td> string </td>
+		<td> nobody </td>
+		<td> Group to run as </td>
 	</tr>
     <tr>     
-		<td> -l </td><td> integer </td><td> 2000 </td><td> ZeroMQ linger value (ZMQ_LINGER) </td>
+		<td> -l </td>
+		<td> integer </td>
+		<td> 2000 </td>
+		<td> ZeroMQ linger value (ZMQ_LINGER) </td>
 	</tr>                         
     <tr>                          
-		<td> -m </td><td> string </td><td> tcp://127.0.0.1:5555 </td><td> Bind dsn for ZeroMQ monitoring socket </td>
+		<td> -m </td>
+		<td> string </td>
+		<td> tcp://127.0.0.1:5555 </td>
+		<td> Bind dsn for ZeroMQ monitoring socket </td>
 	</tr>                         
     <tr>                          
-		<td> -o </td><td> flag </td><td> no </td><td> Optimize for bandwidth usage (exclude headers from messages) </td>
+		<td> -o </td>
+		<td> flag </td>
+		<td> no </td>
+		<td> Optimize for bandwidth usage (exclude headers from messages) </td>
 	</tr>
     <tr>     
-		<td> -p </td><td> integer </td><td> 8080 </td><td> HTTPD listen port </td>
+		<td> -p </td>
+		<td> integer </td>
+		<td> 8080 </td>
+		<td> HTTPD listen port </td>
 	</tr>                         
     <tr>                          
-		<td> -s </td><td> string </td><td> 0 </td><td> Disk offload max size (G/M/k/B) (ZMQ_SWAP) </td>
+		<td> -s </td>
+		<td> string </td>
+		<td> 0 </td>
+		<td> Disk offload max size (G/M/k/B) (ZMQ_SWAP) </td>
 	</tr>                         
     <tr>                          
-		<td> -t </td><td> integer </td><td> 5 </td><td> Number of HTTPD threads </td>
+		<td> -t </td>
+		<td> integer </td>
+		<td> 5 </td>
+		<td> Number of HTTPD threads </td>
 	</tr>
     <tr>     
-		<td> -u </td><td> string </td><td> nobody </td><td> User to run as </td>
+		<td> -u </td>
+		<td> string </td>
+		<td> nobody </td>
+		<td> User to run as </td>
 	</tr>                         
     <tr>                          
-		<td> -w </td><td> integer </td><td> 0 </td><td> The ZeroMQ high watermark limit (ZMQ_HWM) </td>
+		<td> -w </td>
+		<td> integer </td>
+		<td> 0 </td>
+		<td> The ZeroMQ high watermark limit (ZMQ_HWM) </td>
 	</tr>                         
     <tr>                          
-		<td> -z </td><td> string </td><td> tcp://127.0.0.1:5567 </td><td> Comma-separated list of zeromq URIs to connect to </td>
+		<td> -z </td>
+		<td> string </td>
+		<td> tcp://127.0.0.1:5567 </td>
+		<td> Comma-separated list of zeromq URIs to connect to </td>
 	</tr>
 </table>
-			
 
 ### -z connect uri format ###
 
@@ -64,7 +107,8 @@ parameters. Example of a valid -z parameter:
 "tcp://127.0.0.1:2233?hwm=5&swap=10M&linger=100,tcp://127.0.0.1:5555"
 
 A socket that doesn't explicitly specify hwm, swap or linger will use the 
-values defined by -s, -w and -l parameters.
+values defined by -s, -w and -l parameters. If these values are not specified
+in the command-line arguments then the built-in defaults are used.
 
 Monitoring
 ----------
@@ -85,3 +129,10 @@ Example response from monitoring socket might contain:
     </statistics>
  </httpush>
 
+TODO
+----
+
+* Add support for choosing between bind/connect for the ZeroMQ backend
+* Clean-up and comment the code
+* Add more statistics
+* Allow shutdown and maybe changing config via the monitoring socket

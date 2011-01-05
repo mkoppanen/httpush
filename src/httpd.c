@@ -34,7 +34,6 @@ static void print_headers_to_buffer(struct evhttp_request *req, struct evbuffer 
     const char *method = NULL;
     bool has_x_forwarded_for = false;
 
-
     struct evkeyval *header;
     struct evkeyvalq *q;
 
