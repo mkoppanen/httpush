@@ -87,8 +87,8 @@ static void *hp_create_socket(void *context, struct hp_uri_t **uris, size_t num_
             return NULL;
         }
 
-        HP_LOG_DEBUG("(%s) %s, swap=[%" PRIi64 "], hwm=[%" PRIu64 "], linger=[%d]", (type == ZMQ_PUSH ? "connect" : "bind"),
-                uris[i]->uri, uris[i]->swap, uris[i]->hwm, uris[i]->linger);
+        HP_LOG_DEBUG("(%s) %s, swap=[%" PRIi64 "], hwm=[%" PRIu64 "], linger=[%d]",
+            (type == ZMQ_PUSH ? "connect" : "bind"), uris[i]->uri, uris[i]->swap, uris[i]->hwm, uris[i]->linger);
 
         /* Connect push sockets and bind all other sockets */
         if (mode == HP_CONNECT) {
@@ -104,22 +104,6 @@ static void *hp_create_socket(void *context, struct hp_uri_t **uris, size_t num_
     }
     return socket;
 }
-
-#if 0
-void memdmp(void *blob, size_t blob_size)
-{
-    size_t i;
-    char *ptr;
-
-    ptr = blob;
-
-    fprintf(stderr, "dumping blob size: %d\n", (int) blob_size);
-
-    for (i = 0; i < blob_size; i++) {
-        fputc(ptr[i], stderr);
-    }
-}
-#endif
 
 static bool hp_handle_monitoring_command(void *monitor_socket, zmq_pollitem_t *t_items, int num_threads) {
     int rc, i;
